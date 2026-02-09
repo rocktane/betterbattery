@@ -1,0 +1,223 @@
+import Cocoa
+
+class BatteryIconView: NSView {
+    var percentage: Int = 100
+    var isCharging: Bool = false
+    var isPluggedIn: Bool = false
+    var chargeLimitActive: Bool = false
+
+    private let batteryWidth: CGFloat = 22.0
+    private let batteryHeight: CGFloat = 12.0
+    private let terminalWidth: CGFloat = 3.0
+    private let terminalHeight: CGFloat = 4.0
+    private let cornerRadius: CGFloat = 2.0
+    private let borderWidth: CGFloat = 1.0
+
+    override var intrinsicContentSize: NSSize {
+        // Height accommodates bolt tips extending beyond battery body
+        return NSSize(width: batteryWidth + terminalWidth + 1, height: 20)
+    }
+
+    func update(percentage: Int, isCharging: Bool, isPluggedIn: Bool, chargeLimitActive: Bool) {
+        self.percentage = percentage
+        self.isCharging = isCharging
+        self.isPluggedIn = isPluggedIn
+        self.chargeLimitActive = chargeLimitActive
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        drawBattery(in: context, bounds: bounds)
+    }
+
+    func toImage() -> NSImage {
+        let size = intrinsicContentSize
+        let image = NSImage(size: size, flipped: false) { [weak self] rect in
+            guard let self = self,
+                  let context = NSGraphicsContext.current?.cgContext else { return false }
+            self.drawBattery(in: context, bounds: rect)
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    // MARK: - Drawing
+
+    private func drawBattery(in ctx: CGContext, bounds: NSRect) {
+        let borderColor = NSColor.textColor.withAlphaComponent(0.5)
+        let yOffset = (bounds.height - batteryHeight) / 2.0
+
+        // 1. Battery body outline
+        let bodyRect = NSRect(
+            x: borderWidth / 2,
+            y: yOffset + borderWidth / 2,
+            width: batteryWidth - borderWidth,
+            height: batteryHeight - borderWidth
+        )
+        let bodyPath = NSBezierPath(roundedRect: bodyRect, xRadius: cornerRadius, yRadius: cornerRadius)
+        borderColor.set()
+        bodyPath.lineWidth = borderWidth
+        bodyPath.stroke()
+
+        // 2. Terminal nub with destinationOut separator
+        let nubX = batteryWidth
+        let nubY = yOffset + (batteryHeight - terminalHeight) / 2.0
+        let nubRect = NSRect(x: nubX - 1, y: nubY, width: terminalWidth, height: terminalHeight)
+        let nubPath = NSBezierPath(roundedRect: nubRect, xRadius: 2, yRadius: 2)
+        borderColor.set()
+        nubPath.fill()
+
+        let separator = NSBezierPath()
+        separator.move(to: CGPoint(x: nubX, y: yOffset))
+        separator.line(to: CGPoint(x: nubX, y: yOffset + batteryHeight))
+        ctx.saveGState()
+        ctx.setBlendMode(.destinationOut)
+        NSColor.white.set()
+        separator.lineWidth = borderWidth
+        separator.stroke()
+        ctx.restoreGState()
+
+        // 3. Charge fill level
+        let fillInset: CGFloat = borderWidth + 1
+        let maxFillWidth = batteryWidth - fillInset * 2
+        let fillWidth = max(0, maxFillWidth * CGFloat(max(0, min(100, percentage))) / 100.0)
+
+        if fillWidth > 0 {
+            let fillRect = NSRect(
+                x: fillInset,
+                y: yOffset + fillInset,
+                width: fillWidth,
+                height: batteryHeight - fillInset * 2
+            )
+            let innerRadius = max(0, cornerRadius - 1)
+            let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: innerRadius, yRadius: innerRadius)
+
+            let fillColor: NSColor
+            if percentage <= 15 {
+                fillColor = .systemRed
+            } else if percentage <= 25 {
+                fillColor = .systemOrange
+            } else {
+                fillColor = .textColor
+            }
+            fillColor.set()
+            fillPath.fill()
+        }
+
+        // 4. Overlay icons
+        if isPluggedIn {
+            let centerX = batteryWidth / 2.0
+            let centerY = yOffset + batteryHeight / 2.0
+
+            if isCharging {
+                drawBolt(ctx: ctx, centerX: centerX, centerY: centerY)
+            } else if chargeLimitActive {
+                drawPause(ctx: ctx, centerX: centerX, centerY: centerY)
+            } else {
+                drawPlug(ctx: ctx, centerX: centerX, centerY: centerY)
+            }
+        }
+    }
+
+    // MARK: - Stats-style overlay icons
+
+    private func drawBolt(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+        // Exact Stats lightning bolt: 6-point polygon, extends beyond battery body
+        let iconHeight = batteryHeight + 6
+        let minY = centerY - iconHeight / 2
+        let maxY = centerY + iconHeight / 2
+        let minX = centerX - 4.5
+        let maxX = centerX + 4.5
+
+        let bolt = NSBezierPath()
+        bolt.move(to: CGPoint(x: centerX - 3, y: minY))
+        bolt.line(to: CGPoint(x: maxX,        y: centerY + 1.5))
+        bolt.line(to: CGPoint(x: centerX + 1, y: centerY + 1.5))
+        bolt.line(to: CGPoint(x: centerX + 3, y: maxY))
+        bolt.line(to: CGPoint(x: minX,        y: centerY - 1.5))
+        bolt.line(to: CGPoint(x: centerX - 1, y: centerY - 1.5))
+        bolt.close()
+
+        NSColor.textColor.set()
+        bolt.fill()
+
+        ctx.saveGState()
+        ctx.setBlendMode(.destinationOut)
+        NSColor.textColor.set()
+        bolt.lineWidth = 1
+        bolt.stroke()
+        ctx.restoreGState()
+    }
+
+    private func drawPlug(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+        // Exact Stats power plug: 17-point polygon
+        let iconHeight = batteryHeight + 2
+        let minY = centerY - iconHeight / 2
+        let maxY = centerY + iconHeight / 2
+
+        let plug = NSBezierPath()
+        plug.move(to: CGPoint(x: centerX - 1.5,  y: minY + 0.5))
+        plug.line(to: CGPoint(x: centerX + 1.5,  y: minY + 0.5))
+        plug.line(to: CGPoint(x: centerX + 1.5,  y: centerY - 2.5))
+        plug.line(to: CGPoint(x: centerX + 4,    y: centerY + 0.5))
+        plug.line(to: CGPoint(x: centerX + 4,    y: centerY + 4.25))
+        // Right prong
+        plug.line(to: CGPoint(x: centerX + 2.75, y: centerY + 4.25))
+        plug.line(to: CGPoint(x: centerX + 2.75, y: maxY - 0.25))
+        plug.line(to: CGPoint(x: centerX + 0.25, y: maxY - 0.25))
+        plug.line(to: CGPoint(x: centerX + 0.25, y: centerY + 4.25))
+        // Left prong
+        plug.line(to: CGPoint(x: centerX - 0.25, y: centerY + 4.25))
+        plug.line(to: CGPoint(x: centerX - 0.25, y: maxY - 0.25))
+        plug.line(to: CGPoint(x: centerX - 2.75, y: maxY - 0.25))
+        plug.line(to: CGPoint(x: centerX - 2.75, y: centerY + 4.25))
+        plug.line(to: CGPoint(x: centerX - 4,    y: centerY + 4.25))
+        plug.line(to: CGPoint(x: centerX - 4,    y: centerY + 0.5))
+        plug.line(to: CGPoint(x: centerX - 1.5,  y: centerY - 2.5))
+        plug.close()
+
+        NSColor.textColor.set()
+        plug.fill()
+
+        ctx.saveGState()
+        ctx.setBlendMode(.destinationOut)
+        NSColor.textColor.set()
+        plug.lineWidth = 1
+        plug.stroke()
+        ctx.restoreGState()
+    }
+
+    private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+        let barWidth: CGFloat = 1.5
+        let barHeight: CGFloat = 5.0
+        let gap: CGFloat = 2.0
+
+        let leftBar = NSBezierPath(rect: NSRect(
+            x: centerX - gap / 2 - barWidth,
+            y: centerY - barHeight / 2,
+            width: barWidth,
+            height: barHeight
+        ))
+        let rightBar = NSBezierPath(rect: NSRect(
+            x: centerX + gap / 2,
+            y: centerY - barHeight / 2,
+            width: barWidth,
+            height: barHeight
+        ))
+
+        NSColor.textColor.set()
+        leftBar.fill()
+        rightBar.fill()
+
+        ctx.saveGState()
+        ctx.setBlendMode(.destinationOut)
+        NSColor.textColor.set()
+        leftBar.lineWidth = 1
+        leftBar.stroke()
+        rightBar.lineWidth = 1
+        rightBar.stroke()
+        ctx.restoreGState()
+    }
+}

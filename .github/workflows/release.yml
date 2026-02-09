@@ -1,0 +1,110 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha256: ${{ steps.meta.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build
+        run: make build
+
+      - name: Package & compute SHA256
+        id: meta
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          cd build
+          zip -r BetterBattery.zip BetterBattery.app
+          SHA=$(shasum -a 256 BetterBattery.zip | awk '{print $1}')
+          VERSION="${REF#refs/tags/v}"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        with:
+          name: BetterBattery v${{ steps.meta.outputs.version }}
+          body: |
+            ## Installation
+
+            ### Homebrew (recommended)
+            ```
+            brew install --cask ${{ github.repository_owner }}/tap/betterbattery
+            ```
+
+            ### Manual
+            1. Download `BetterBattery.zip` below
+            2. Unzip and move `BetterBattery.app` to `/Applications`
+            3. Right-click → Open on first launch (unsigned app)
+
+            ## Requirements
+            - **Apple Silicon Mac (M1+)** — macOS 12+
+            - [`smc`](https://github.com/beltex/SMCKit) binary at `/usr/local/bin/smc`
+          files: build/BetterBattery.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Update cask
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > tap/Casks/betterbattery.rb << CASK
+          cask "betterbattery" do
+            version "$VERSION"
+            sha256 "$SHA256"
+
+            url "https://github.com/$REPO/releases/download/v#{version}/BetterBattery.zip"
+            name "BetterBattery"
+            desc "macOS menu bar battery charge limiter"
+            homepage "https://github.com/$REPO"
+
+            app "BetterBattery.app"
+          end
+          CASK
+
+      - name: Push to tap
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/betterbattery.rb
+          git diff --staged --quiet && echo "No changes" && exit 0
+          git commit -m "Update betterbattery to v${VERSION}"
+          git push
