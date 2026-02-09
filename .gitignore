@@ -52,6 +52,9 @@ Icon?
 *.mobileprovision
 *.provisionprofile
 
+# === Dev scripts ===
+scripts/
+
 # === Misc ===
 *.log
 *.tmp

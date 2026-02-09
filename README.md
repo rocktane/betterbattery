@@ -22,11 +22,19 @@ Menu bar app for macOS that limits battery charging via SMC to preserve battery 
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew install --cask rocktane/tap/betterbattery
+```
+
+### Manual
+
 Download the latest release from the [Releases](../../releases) page, unzip, and move `BetterBattery.app` to `/Applications`.
 
-Or build from source:
+### From source
 
-```
+```bash
 make build
 make install
 ```
