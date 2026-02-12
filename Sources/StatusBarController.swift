@@ -52,6 +52,7 @@ class StatusBarController {
         )
 
         updateStatusBarImage(state: state)
+        checkAutoLPM(percentage: state.percentage)
         rebuildMenu()
     }
 
@@ -275,6 +276,23 @@ class StatusBarController {
         sleepItem.state = chargeLimiter.stopChargingBeforeSleep ? .on : .off
         menu.addItem(sleepItem)
 
+        // Auto Low Power Mode submenu
+        let autoLPMSubmenu = NSMenu()
+        let lpmOptions: [(String, Int)] = [
+            ("Désactivé", 0), ("10%", 10), ("20%", 20),
+            ("30%", 30), ("40%", 40), ("50%", 50)
+        ]
+        for (title, value) in lpmOptions {
+            let item = NSMenuItem(title: title, action: #selector(setAutoLPMThreshold(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = value
+            item.state = autoLPMThreshold == value ? .on : .off
+            autoLPMSubmenu.addItem(item)
+        }
+        let autoLPMItem = NSMenuItem(title: "Auto Low Power Mode", action: nil, keyEquivalent: "")
+        autoLPMItem.submenu = autoLPMSubmenu
+        menu.addItem(autoLPMItem)
+
         // Low Power Mode toggle
         let lowPowerItem = NSMenuItem(
             title: "Low Power Mode",
@@ -355,14 +373,52 @@ class StatusBarController {
 
     @objc private func toggleLowPowerMode() {
         let enable = !ProcessInfo.processInfo.isLowPowerModeEnabled
+        setLowPowerMode(enable)
+
+        // If auto-LPM activated and user manually toggles, stop auto from re-enabling
+        if autoLPMState == .activated {
+            autoLPMState = .userOverridden
+        }
+    }
+
+    @objc private func setAutoLPMThreshold(_ sender: NSMenuItem) {
+        autoLPMThreshold = sender.tag
+        defaults.set(autoLPMThreshold, forKey: "autoLPMThreshold")
+        autoLPMState = .idle
+        rebuildMenu()
+    }
+
+    private func checkAutoLPM(percentage: Int) {
+        guard autoLPMThreshold > 0 else { return }
+
+        let disableThreshold = autoLPMThreshold + 20
+
+        switch autoLPMState {
+        case .idle:
+            if percentage <= autoLPMThreshold {
+                setLowPowerMode(true)
+                autoLPMState = .activated
+            }
+        case .activated:
+            if percentage >= disableThreshold {
+                setLowPowerMode(false)
+                autoLPMState = .idle
+            }
+        case .userOverridden:
+            if percentage >= disableThreshold {
+                autoLPMState = .idle
+            }
+        }
+    }
+
+    private func setLowPowerMode(_ enabled: Bool) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        process.arguments = ["-n", "/usr/bin/pmset", "-a", "lowpowermode", enable ? "1" : "0"]
+        process.arguments = ["-n", "/usr/bin/pmset", "-a", "lowpowermode", enabled ? "1" : "0"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
-        // ProcessInfo needs a moment to reflect the change
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.rebuildMenu()
         }

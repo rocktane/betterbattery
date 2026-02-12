@@ -61,3 +61,6 @@ scripts/
 *.bak
 *.orig
 Thumbs.db
+
+# === Markdown ===
+*.md
