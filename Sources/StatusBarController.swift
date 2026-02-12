@@ -291,6 +291,7 @@ class StatusBarController {
         }
         let autoLPMItem = NSMenuItem(title: "Auto Low Power Mode", action: nil, keyEquivalent: "")
         autoLPMItem.submenu = autoLPMSubmenu
+        autoLPMItem.state = autoLPMThreshold > 0 ? .on : .off
         menu.addItem(autoLPMItem)
 
         // Low Power Mode toggle
