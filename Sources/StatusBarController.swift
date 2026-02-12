@@ -389,7 +389,7 @@ class StatusBarController {
     }
 
     private func checkAutoLPM(percentage: Int) {
-        guard autoLPMThreshold > 0 else { return }
+        guard autoLPMThreshold > 0, percentage > 0 else { return }
 
         let disableThreshold = autoLPMThreshold + 20
 
