@@ -5,11 +5,8 @@ import os.log
 
 enum MagSafeLEDColor: UInt8 {
     case system = 0x00          // Contrôle par macOS (défaut)
-    case off = 0x01             // LED éteinte
-    case green = 0x03           // Vert fixe (plein / limite atteinte)
-    case orange = 0x04          // Orange fixe (limite active, maintien)
-    case orangeSlowBlink = 0x06 // Orange clignotement lent (en charge)
-    case orangeFastBlink = 0x07 // Orange clignotement rapide
+    case green = 0x03           // Vert fixe (limite atteinte)
+    case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }
 
 class SMCController {

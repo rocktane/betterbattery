@@ -17,6 +17,11 @@ class StatusBarController {
     private var currentState = BatteryState()
     private var displayMode: MenuBarDisplayMode = .percentage
 
+    // Auto Low Power Mode
+    private enum AutoLPMState { case idle, activated, userOverridden }
+    private var autoLPMThreshold: Int = 0  // 0 = disabled
+    private var autoLPMState: AutoLPMState = .idle
+
     init(batteryReader: BatteryReader, chargeLimiter: ChargeLimiter, smc: SMCController) {
         self.batteryReader = batteryReader
         self.chargeLimiter = chargeLimiter
@@ -24,6 +29,9 @@ class StatusBarController {
 
         let savedMode = defaults.integer(forKey: "displayMode")
         displayMode = MenuBarDisplayMode(rawValue: savedMode) ?? .percentage
+
+        let savedLPM = defaults.integer(forKey: "autoLPMThreshold")
+        autoLPMThreshold = [0, 10, 20, 30, 40, 50].contains(savedLPM) ? savedLPM : 0
 
         setupStatusItem()
 

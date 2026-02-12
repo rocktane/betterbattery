@@ -148,6 +148,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func cleanupAndRestore() {
         batteryReader.stop()
 
+        // Remember whether the limit was active before stopping
+        let wasActive = chargeLimiter.isActive
+
         // Re-enable charging if we had it disabled
         if chargeLimiter.isActive && !chargeLimiter.chargingEnabled {
             if !smcController.enableCharging() {
@@ -157,6 +160,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         chargeLimiter.stop()
+
+        // Restore the enabled flag so the limit is re-applied on next launch
+        if wasActive {
+            UserDefaults.standard.set(true, forKey: "chargeLimitEnabled")
+        }
         UserDefaults.standard.set(false, forKey: "chargingWasDisabled")
     }
 }

@@ -127,7 +127,7 @@ class ChargeLimiter {
         if !chargingEnabled {
             if smc.enableCharging() {
                 chargingEnabled = true
-                smc.setMagSafeLED(.orangeSlowBlink)
+                smc.setMagSafeLED(.system)
             }
         }
         bbLog.info("Top Up activated")
@@ -228,7 +228,7 @@ class ChargeLimiter {
             } else {
                 bbLog.warning("Failed to enable charging at \(percentage)%%")
             }
-            smc.setMagSafeLED(.orangeSlowBlink)
+            smc.setMagSafeLED(.system)
             onStateChange?()
         }
 
@@ -238,10 +238,10 @@ class ChargeLimiter {
     private func syncMagSafeLED(percentage: Int) {
         if thermalHold {
             smc.setMagSafeLED(.orangeFastBlink)
-        } else if percentage >= 100 {
-            smc.setMagSafeLED(.green)
         } else if !chargingEnabled {
-            smc.setMagSafeLED(.orange)
+            smc.setMagSafeLED(.green)
+        } else {
+            smc.setMagSafeLED(.system)
         }
     }
 }

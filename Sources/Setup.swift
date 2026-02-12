@@ -13,18 +13,18 @@ struct Setup {
         if !hasRun {
             performSetup()
             defaults.set(true, forKey: "hasCompletedSetup")
-            defaults.set(true, forKey: "sudoersV4")
+            defaults.set(true, forKey: "sudoersV5")
             defaults.set(NSUserName(), forKey: "sudoersInstalledUser")
         } else {
             verifySetup()
-            // Upgrade sudoers if needed (V4 scopes to current user + temp file install)
-            let needsUpgrade = !defaults.bool(forKey: "sudoersV4")
+            // Upgrade sudoers if needed (V5 reduces ACLC whitelist to used values only)
+            let needsUpgrade = !defaults.bool(forKey: "sudoersV5")
             let userChanged = defaults.string(forKey: "sudoersInstalledUser") != NSUserName()
             if needsUpgrade || userChanged {
                 if FileManager.default.fileExists(atPath: sudoersPath) {
                     installSudoers()
                 }
-                defaults.set(true, forKey: "sudoersV4")
+                defaults.set(true, forKey: "sudoersV5")
                 defaults.set(NSUserName(), forKey: "sudoersInstalledUser")
             }
         }
@@ -86,7 +86,7 @@ struct Setup {
         # Better Battery - Restricted SMC access for charge control
         Cmnd_Alias BATTERY_CHARGE = /usr/local/bin/smc -k CHTE -r, /usr/local/bin/smc -k CHTE -w 00000000, /usr/local/bin/smc -k CHTE -w 01000000, /usr/local/bin/smc -k CH0B -r, /usr/local/bin/smc -k CH0B -w 00, /usr/local/bin/smc -k CH0B -w 02, /usr/local/bin/smc -k CH0C -r, /usr/local/bin/smc -k CH0C -w 00, /usr/local/bin/smc -k CH0C -w 02
         Cmnd_Alias BATTERY_DISCHARGE = /usr/local/bin/smc -k CHIE -r, /usr/local/bin/smc -k CHIE -w 00, /usr/local/bin/smc -k CHIE -w 08, /usr/local/bin/smc -k CH0I -r, /usr/local/bin/smc -k CH0I -w 00, /usr/local/bin/smc -k CH0I -w 01
-        Cmnd_Alias BATTERY_LED = /usr/local/bin/smc -k ACLC -r, /usr/local/bin/smc -k ACLC -w 00, /usr/local/bin/smc -k ACLC -w 01, /usr/local/bin/smc -k ACLC -w 03, /usr/local/bin/smc -k ACLC -w 04, /usr/local/bin/smc -k ACLC -w 06, /usr/local/bin/smc -k ACLC -w 07
+        Cmnd_Alias BATTERY_LED = /usr/local/bin/smc -k ACLC -r, /usr/local/bin/smc -k ACLC -w 00, /usr/local/bin/smc -k ACLC -w 03, /usr/local/bin/smc -k ACLC -w 07
         Cmnd_Alias BATTERY_POWER = /usr/bin/pmset -a lowpowermode 0, /usr/bin/pmset -a lowpowermode 1
         \(username) ALL = NOPASSWD: BATTERY_CHARGE
         \(username) ALL = NOPASSWD: BATTERY_DISCHARGE

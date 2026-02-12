@@ -111,10 +111,10 @@ class BatteryIconView: NSView {
             let centerX = batteryWidth / 2.0
             let centerY = yOffset + batteryHeight / 2.0
 
-            if isCharging {
-                drawBolt(ctx: ctx, centerX: centerX, centerY: centerY)
-            } else if chargeLimitActive {
+            if chargeLimitActive {
                 drawPause(ctx: ctx, centerX: centerX, centerY: centerY)
+            } else if isCharging {
+                drawBolt(ctx: ctx, centerX: centerX, centerY: centerY)
             } else {
                 drawPlug(ctx: ctx, centerX: centerX, centerY: centerY)
             }
@@ -192,7 +192,7 @@ class BatteryIconView: NSView {
     private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
         let barWidth: CGFloat = 1.5
         let barHeight: CGFloat = 5.0
-        let gap: CGFloat = 2.0
+        let gap: CGFloat = 2.5
 
         let leftBar = NSBezierPath(rect: NSRect(
             x: centerX - gap / 2 - barWidth,
@@ -207,17 +207,8 @@ class BatteryIconView: NSView {
             height: barHeight
         ))
 
-        NSColor.textColor.set()
+        NSColor.white.set()
         leftBar.fill()
         rightBar.fill()
-
-        ctx.saveGState()
-        ctx.setBlendMode(.destinationOut)
-        NSColor.textColor.set()
-        leftBar.lineWidth = 1
-        leftBar.stroke()
-        rightBar.lineWidth = 1
-        rightBar.stroke()
-        ctx.restoreGState()
     }
 }
