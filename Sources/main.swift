@@ -65,7 +65,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 bbLog.warning("Failed to re-enable charging at startup")
             }
             smcController.setMagSafeLED(.system)
-            defaults.set(false, forKey: "chargingWasDisabled")
         }
 
         installSignalHandler()
@@ -165,7 +164,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if wasActive {
             UserDefaults.standard.set(true, forKey: "chargeLimitEnabled")
         }
-        UserDefaults.standard.set(false, forKey: "chargingWasDisabled")
     }
 }
 

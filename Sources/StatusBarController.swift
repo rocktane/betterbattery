@@ -170,11 +170,11 @@ class StatusBarController {
 
         // Status line
         let statusText: String
-        if chargeLimiter.thermalHold {
+        if chargeLimiter.thermalHold && currentState.isPluggedIn {
             statusText = "Status: Charging paused (temperature)"
-        } else if chargeLimiter.topUpActive {
+        } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
             statusText = "Status: Top Up in progress"
-        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled {
+        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
             statusText = "Status: Charging paused"
         } else if currentState.isCharging {
             statusText = "Status: Charging"
@@ -393,20 +393,21 @@ class StatusBarController {
         guard autoLPMThreshold > 0, percentage > 0 else { return }
 
         let disableThreshold = autoLPMThreshold + 20
+        let isPluggedIn = currentState.isPluggedIn
 
         switch autoLPMState {
         case .idle:
-            if percentage <= autoLPMThreshold {
+            if percentage <= autoLPMThreshold && !isPluggedIn {
                 setLowPowerMode(true)
                 autoLPMState = .activated
             }
         case .activated:
-            if percentage >= disableThreshold {
+            if percentage >= disableThreshold || isPluggedIn {
                 setLowPowerMode(false)
                 autoLPMState = .idle
             }
         case .userOverridden:
-            if percentage >= disableThreshold {
+            if percentage >= disableThreshold || isPluggedIn {
                 autoLPMState = .idle
             }
         }

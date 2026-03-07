@@ -69,20 +69,24 @@ class SMCController {
 
     private func validateSmcFileProperties() -> Bool {
         let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: smcPath) else {
-            bbLog.warning("Cannot read attributes of smc binary")
+
+        // Reject symlinks via lstat (attributesOfItem follows symlinks, so .typeSymbolicLink is never returned)
+        var stat = stat()
+        guard lstat(smcPath, &stat) == 0 else {
+            bbLog.warning("Cannot stat smc binary")
             return false
         }
-
-        // Reject symlinks
-        if let fileType = attrs[.type] as? FileAttributeType, fileType == .typeSymbolicLink {
+        if (stat.st_mode & S_IFMT) == S_IFLNK {
             bbLog.error("smc binary is a symlink — refusing to execute")
             return false
         }
+        if (stat.st_mode & S_IFMT) != S_IFREG {
+            bbLog.error("smc binary is not a regular file")
+            return false
+        }
 
-        // Must be a regular file
-        if let fileType = attrs[.type] as? FileAttributeType, fileType != .typeRegular {
-            bbLog.error("smc binary is not a regular file (type: \(String(describing: fileType)))")
+        guard let attrs = try? fm.attributesOfItem(atPath: smcPath) else {
+            bbLog.warning("Cannot read attributes of smc binary")
             return false
         }
 
@@ -258,7 +262,10 @@ class SMCController {
 
     @discardableResult
     func setMagSafeLED(_ color: MagSafeLEDColor) -> Bool {
-        writeKey("ACLC", value: String(format: "%02x", color.rawValue))
+        // LED is cosmetic — use unverified write because macOS may override ACLC
+        // (e.g., .system writes 0x00 but macOS sets 0x04, failing read-after-write)
+        let value = String(format: "%02x", color.rawValue)
+        return runSMC(args: ["-k", "ACLC", "-w", value]) != nil
     }
 
     // MARK: - Capabilities Detection

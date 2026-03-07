@@ -43,14 +43,13 @@ class ChargeLimiter {
     }
 
     private(set) var isActive: Bool = false
-    private(set) var chargingEnabled: Bool = true {
-        didSet { defaults.set(!chargingEnabled, forKey: "chargingWasDisabled") }
-    }
+    private(set) var chargingEnabled: Bool = true
 
     private var lastPercentage: Int = 0
     private var lastIsPluggedIn: Bool = false
     private var lastTemperature: Double = 0.0
     private var wasPluggedIn: Bool = false
+    private var lastLEDColor: MagSafeLEDColor?
 
     var onStateChange: (() -> Void)?
 
@@ -72,16 +71,27 @@ class ChargeLimiter {
             }
         }
         let savedAmplitude = defaults.integer(forKey: "hysteresisAmplitude")
-        if savedAmplitude > 0 {
+        if savedAmplitude >= 2 && savedAmplitude <= 10 {
             hysteresisAmplitude = savedAmplitude
+        } else if savedAmplitude != 0 {
+            bbLog.warning("Invalid saved amplitude \(savedAmplitude) — using default 5")
+            defaults.removeObject(forKey: "hysteresisAmplitude")
         }
         stopChargingBeforeSleep = defaults.bool(forKey: "stopChargingBeforeSleep")
     }
 
     func start() {
         isActive = true
-        chargingEnabled = true
         defaults.set(true, forKey: "chargeLimitEnabled")
+
+        // Assert SMC state: ensure charging is physically enabled.
+        // Prevents desync if SMC was left in disabled state (crash, failed cleanup).
+        if smc.enableCharging() {
+            chargingEnabled = true
+        } else {
+            chargingEnabled = false
+            bbLog.warning("Failed to enable charging on start — will retry on next check")
+        }
 
         // Perform an immediate check
         check(percentage: lastPercentage, isPluggedIn: lastIsPluggedIn, temperature: lastTemperature)
@@ -107,14 +117,14 @@ class ChargeLimiter {
         timer = nil
         defaults.set(false, forKey: "chargeLimitEnabled")
 
-        // Always re-enable charging unconditionally — internal state may be
+        // Always re-enable charging — internal state may be
         // out of sync with actual SMC state (crash, failed write, sleep/wake race).
-        if !smc.enableCharging() {
-            bbLog.warning("Failed to re-enable charging on stop — retrying")
-            _ = smc.enableCharging()
+        let enabled = smc.enableCharging() || smc.enableCharging() // retry once
+        if !enabled {
+            bbLog.warning("Failed to re-enable charging on stop after retry")
         }
         smc.setMagSafeLED(.system)
-        chargingEnabled = true
+        chargingEnabled = enabled
 
         onStateChange?()
     }
@@ -183,6 +193,7 @@ class ChargeLimiter {
                 topUpActive = false
                 bbLog.info("Top Up reset on unplug")
             }
+            thermalHold = false
             if !smc.disableCharging() {
                 bbLog.warning("Failed to disable charging on unplug")
             }
@@ -193,6 +204,15 @@ class ChargeLimiter {
         }
 
         guard isPluggedIn else { return }
+
+        // Plug-in transition: re-enable charging if below limit
+        if !previouslyPluggedIn && isPluggedIn && !chargingEnabled && percentage < upperBound {
+            if smc.enableCharging() {
+                chargingEnabled = true
+                smc.setMagSafeLED(.system)
+                onStateChange?()
+            }
+        }
 
         // Thermal protection
         if temperature > thermalStopCharging && chargingEnabled {
@@ -208,6 +228,14 @@ class ChargeLimiter {
 
         if thermalHold && temperature < thermalResumeCharging {
             thermalHold = false
+            // Restore charging if below limit (avoids dead zone where neither hysteresis branch triggers)
+            if !chargingEnabled && percentage < upperBound {
+                if smc.enableCharging() {
+                    chargingEnabled = true
+                }
+                smc.setMagSafeLED(.system)
+                onStateChange?()
+            }
             bbLog.info("Thermal hold cleared at \(temperature, format: .fixed(precision: 1))°C")
         }
 
@@ -236,12 +264,18 @@ class ChargeLimiter {
     }
 
     private func syncMagSafeLED(percentage: Int) {
+        let desired: MagSafeLEDColor
         if thermalHold {
-            smc.setMagSafeLED(.orangeFastBlink)
+            desired = .orangeFastBlink
         } else if !chargingEnabled {
-            smc.setMagSafeLED(.green)
+            desired = .green
         } else {
-            smc.setMagSafeLED(.system)
+            desired = .system
+        }
+        if desired != lastLEDColor {
+            if smc.setMagSafeLED(desired) {
+                lastLEDColor = desired
+            }
         }
     }
 }

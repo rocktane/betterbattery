@@ -27,10 +27,10 @@ struct LaunchAtLogin {
         }
 
         // Anti-symlink check: refuse to write if existing path is a symlink
+        // Use lstat because attributesOfItem follows symlinks
         if fm.fileExists(atPath: plistPath) {
-            if let attrs = try? fm.attributesOfItem(atPath: plistPath),
-               let fileType = attrs[.type] as? FileAttributeType,
-               fileType == .typeSymbolicLink {
+            var stat = stat()
+            if lstat(plistPath, &stat) == 0 && (stat.st_mode & S_IFMT) == S_IFLNK {
                 bbLog.error("LaunchAgent path is a symlink — refusing to write")
                 return
             }

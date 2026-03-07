@@ -49,18 +49,21 @@ struct Setup {
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 alert.messageText = "smc not found"
-                alert.informativeText = "The binary /usr/local/bin/smc does not exist. Charge limiting will not work.\n\nInstall it via: brew install smctemp or from github.com/actuallymentor/battery"
+                alert.informativeText = "The binary /usr/local/bin/smc does not exist. Charge limiting will not work.\n\nInstall it from: github.com/actuallymentor/battery"
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
             }
+        } else if !FileManager.default.fileExists(atPath: sudoersPath) {
+            // smc exists but sudoers was never installed (e.g., first setup ran without smc)
+            installSudoers()
         }
     }
 
     private static func showSMCMissingAlert() {
         let alert = NSAlert()
         alert.messageText = "Initial setup"
-        alert.informativeText = "Better Battery requires the 'smc' binary to control charging.\n\nIt was not found at /usr/local/bin/smc.\n\nYou can install it via:\n• brew install smctemp\n• Or from github.com/actuallymentor/battery\n\nBattery reading will work, but charge limiting will not."
+        alert.informativeText = "Better Battery requires the 'smc' binary to control charging.\n\nIt was not found at /usr/local/bin/smc.\n\nYou can install it from:\n• github.com/actuallymentor/battery\n\nBattery reading will work, but charge limiting will not."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Install sudoers anyway")
