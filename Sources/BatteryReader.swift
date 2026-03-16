@@ -26,7 +26,7 @@ struct BatteryState {
         guard let minutes = timeRemaining, minutes > 0, minutes < 6000 else { return nil }
         let h = minutes / 60
         let m = minutes % 60
-        return "\(h):\(String(format: "%02d", m))"
+        return "\(h)h\(String(format: "%02d", m))min"
     }
 }
 

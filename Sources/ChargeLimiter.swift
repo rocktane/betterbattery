@@ -97,14 +97,7 @@ class ChargeLimiter {
         check(percentage: lastPercentage, isPluggedIn: lastIsPluggedIn, temperature: lastTemperature)
 
         // Start periodic timer for safety (in case events are missed)
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if !self.smc.isAvailable {
-                self.smc.redetectCapabilities()
-            }
-            self.check(percentage: self.lastPercentage, isPluggedIn: self.lastIsPluggedIn, temperature: self.lastTemperature)
-        }
+        startTimer()
 
         onStateChange?()
     }
@@ -150,10 +143,29 @@ class ChargeLimiter {
         check(percentage: lastPercentage, isPluggedIn: lastIsPluggedIn, temperature: lastTemperature)
     }
 
+    // MARK: - Timer
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if !self.smc.isAvailable {
+                self.smc.redetectCapabilities()
+            }
+            self.check(percentage: self.lastPercentage, isPluggedIn: self.lastIsPluggedIn, temperature: self.lastTemperature)
+        }
+        // Allow macOS to defer the timer during sleep — prevents dark wake → full wake
+        timer?.tolerance = 30
+    }
+
     // MARK: - Sleep / Wake
 
-    /// Called before macOS sleep. Disables charging to prevent charging to 100% during sleep.
+    /// Called before macOS sleep. Stops the timer and disables charging if configured.
     func onSleep() {
+        timer?.invalidate()
+        timer = nil
+        bbLog.info("Timer suspended for sleep")
+
         guard isActive && stopChargingBeforeSleep else { return }
         // Write to SMC without changing chargingEnabled — onWake re-asserts the real state.
         if !smc.disableCharging() {
@@ -165,6 +177,10 @@ class ChargeLimiter {
     /// Re-assert current charging state to SMC after wake from sleep.
     func onWake() {
         guard isActive else { return }
+
+        // Restart the periodic safety timer
+        startTimer()
+
         if chargingEnabled {
             if !smc.enableCharging() {
                 bbLog.warning("Failed to re-enable charging on wake — will retry next cycle")

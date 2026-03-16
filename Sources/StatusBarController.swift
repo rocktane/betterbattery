@@ -125,6 +125,64 @@ class StatusBarController {
 
     private func rebuildMenu() {
         let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        // ── Battery info section ──
+
+        func infoItem(_ text: String, bold: Bool = false) -> NSMenuItem {
+            let label = NSTextField(labelWithString: text)
+            label.font = bold ? NSFont.boldSystemFont(ofSize: 13) : NSFont.menuFont(ofSize: 13)
+            label.textColor = .labelColor
+            label.sizeToFit()
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: label.frame.width + 40, height: label.frame.height + 4))
+            label.frame.origin = CGPoint(x: 20, y: 2)
+            container.addSubview(label)
+            let item = NSMenuItem()
+            item.view = container
+            return item
+        }
+
+        // Line 1: 94% — Paused (bold)
+        let statusText: String
+        if chargeLimiter.thermalHold && currentState.isPluggedIn {
+            statusText = "Paused (🔥)"
+        } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
+            statusText = "Topping Up"
+        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
+            statusText = "Paused"
+        } else if currentState.isCharging {
+            statusText = "Charging"
+        } else if currentState.isPluggedIn {
+            statusText = "Power Adapter"
+        } else {
+            statusText = "Battery"
+        }
+        menu.addItem(infoItem("\(currentState.percentage)% — \(statusText)", bold: true))
+
+        // Line 2: 2h32min until full (optional)
+        if let timeStr = currentState.timeRemainingFormatted {
+            let label = currentState.isCharging ? "until full" : "remaining"
+            menu.addItem(infoItem("\(timeStr) \(label)"))
+        }
+
+        // Line 3: Power adapter: 60W (when plugged in)
+        if currentState.isPluggedIn && currentState.adapterWatts > 0 {
+            menu.addItem(infoItem("Power adapter: \(currentState.adapterWatts)W"))
+        }
+
+        // Line 4: 30°C • 12.44V • 0W
+        let power = Int(round(currentState.voltage * (Double(abs(currentState.amperage)) / 1000.0)))
+        let temp = Int(round(currentState.temperature))
+        menu.addItem(infoItem(String(format: "%d°C • %.2fV • %dW", temp, currentState.voltage, power)))
+
+        // Line 5: Health: 77% (538 cycles)
+        menu.addItem(infoItem("Health: \(currentState.health)% (\(currentState.cycleCount) cycles)"))
+
+        // Line 6: Uptime: 6d 0h 42min
+        let uptime = ProcessInfo.processInfo.systemUptime
+        menu.addItem(infoItem("Uptime: \(formatUptime(uptime))"))
+
+        menu.addItem(.separator())
 
         // ── Charge control section ──
 
@@ -145,69 +203,6 @@ class StatusBarController {
             topUpItem.state = chargeLimiter.topUpActive ? .on : .off
             menu.addItem(topUpItem)
         }
-
-        menu.addItem(.separator())
-
-        // ── Battery info section ──
-
-        let batteryInfo = NSMenuItem(title: "Battery: \(currentState.percentage)%", action: nil, keyEquivalent: "")
-        batteryInfo.isEnabled = false
-        menu.addItem(batteryInfo)
-
-        let healthInfo = NSMenuItem(
-            title: "Health: \(currentState.health)% (\(currentState.cycleCount) cycles)",
-            action: nil, keyEquivalent: ""
-        )
-        healthInfo.isEnabled = false
-        menu.addItem(healthInfo)
-
-        if let timeStr = currentState.timeRemainingFormatted {
-            let label = currentState.isCharging ? "Time to full" : "Time remaining"
-            let timeInfo = NSMenuItem(title: "\(label) : \(timeStr)", action: nil, keyEquivalent: "")
-            timeInfo.isEnabled = false
-            menu.addItem(timeInfo)
-        }
-
-        // Status line
-        let statusText: String
-        if chargeLimiter.thermalHold && currentState.isPluggedIn {
-            statusText = "Status: Charging paused (temperature)"
-        } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
-            statusText = "Status: Top Up in progress"
-        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
-            statusText = "Status: Charging paused"
-        } else if currentState.isCharging {
-            statusText = "Status: Charging"
-        } else if currentState.isPluggedIn {
-            statusText = "Status: On AC power"
-        } else {
-            statusText = "Status: On battery"
-        }
-        let statusInfo = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-        statusInfo.isEnabled = false
-        menu.addItem(statusInfo)
-
-        // Adapter wattage (separate line, shown when plugged in)
-        if currentState.isPluggedIn && currentState.adapterWatts > 0 {
-            let adapterInfo = NSMenuItem(title: "Charger: \(currentState.adapterWatts)W", action: nil, keyEquivalent: "")
-            adapterInfo.isEnabled = false
-            menu.addItem(adapterInfo)
-        }
-
-        // Temperature & Voltage & Power
-        let power = currentState.voltage * (Double(abs(currentState.amperage)) / 1000.0)
-        let detailInfo = NSMenuItem(
-            title: String(format: "%.1f°C  •  %.2fV  •  %.1fW", currentState.temperature, currentState.voltage, power),
-            action: nil, keyEquivalent: ""
-        )
-        detailInfo.isEnabled = false
-        menu.addItem(detailInfo)
-
-        // Uptime
-        let uptime = ProcessInfo.processInfo.systemUptime
-        let uptimeInfo = NSMenuItem(title: "Uptime: \(formatUptime(uptime))", action: nil, keyEquivalent: "")
-        uptimeInfo.isEnabled = false
-        menu.addItem(uptimeInfo)
 
         menu.addItem(.separator())
 

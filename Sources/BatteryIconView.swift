@@ -190,25 +190,29 @@ class BatteryIconView: NSView {
     }
 
     private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
-        let barWidth: CGFloat = 1.5
-        let barHeight: CGFloat = 5.0
-        let gap: CGFloat = 2.5
+        let tildeWidth: CGFloat = 8.0
+        let amplitude: CGFloat = 2.0
+        let lineWidth: CGFloat = 1.5
 
-        let leftBar = NSBezierPath(rect: NSRect(
-            x: centerX - gap / 2 - barWidth,
-            y: centerY - barHeight / 2,
-            width: barWidth,
-            height: barHeight
-        ))
-        let rightBar = NSBezierPath(rect: NSRect(
-            x: centerX + gap / 2,
-            y: centerY - barHeight / 2,
-            width: barWidth,
-            height: barHeight
-        ))
+        let tilde = NSBezierPath()
+        let startX = centerX - tildeWidth / 2
+        let endX = centerX + tildeWidth / 2
+
+        tilde.move(to: CGPoint(x: startX, y: centerY))
+        tilde.curve(
+            to: CGPoint(x: centerX, y: centerY),
+            controlPoint1: CGPoint(x: startX + tildeWidth * 0.15, y: centerY + amplitude),
+            controlPoint2: CGPoint(x: centerX - tildeWidth * 0.15, y: centerY + amplitude)
+        )
+        tilde.curve(
+            to: CGPoint(x: endX, y: centerY),
+            controlPoint1: CGPoint(x: centerX + tildeWidth * 0.15, y: centerY - amplitude),
+            controlPoint2: CGPoint(x: endX - tildeWidth * 0.15, y: centerY - amplitude)
+        )
 
         NSColor.white.set()
-        leftBar.fill()
-        rightBar.fill()
+        tilde.lineWidth = lineWidth
+        tilde.lineCapStyle = .round
+        tilde.stroke()
     }
 }
