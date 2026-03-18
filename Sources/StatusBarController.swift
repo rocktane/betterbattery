@@ -48,7 +48,8 @@ class StatusBarController {
             percentage: state.percentage,
             isCharging: state.isCharging,
             isPluggedIn: state.isPluggedIn,
-            chargeLimitActive: chargeLimiter.isActive && !chargeLimiter.chargingEnabled
+            chargeLimitActive: chargeLimiter.isActive && !chargeLimiter.chargingEnabled,
+            topUpActive: chargeLimiter.topUpActive
         )
 
         updateStatusBarImage(state: state)
@@ -64,6 +65,62 @@ class StatusBarController {
         rebuildMenu()
     }
 
+    // MARK: - Smart time remaining
+
+    /// Returns the effective time remaining and label based on charge limiter state.
+    private func effectiveTimeRemaining() -> (minutes: Int, label: String)? {
+        let state = currentState
+
+        if !state.isPluggedIn {
+            // Discharging on battery
+            guard let minutes = state.timeToEmpty, minutes > 0, minutes < 6000 else { return nil }
+            return (minutes, "remaining")
+        }
+
+        // Plugged in
+        if chargeLimiter.topUpActive {
+            // Top up: show time to 100%
+            guard state.percentage < 100,
+                  let timeToCharge = state.timeToCharge, timeToCharge > 0, timeToCharge < 6000 else { return nil }
+            return (timeToCharge, "until full")
+        }
+
+        if chargeLimiter.isActive {
+            // Limit active
+            if chargeLimiter.thermalHold { return nil }
+            guard chargeLimiter.chargingEnabled else { return nil } // paused at/above upperBound
+
+            let upper = chargeLimiter.upperBound
+            guard state.percentage < upper,
+                  let timeToCharge = state.timeToCharge, timeToCharge > 0, timeToCharge < 6000,
+                  state.percentage < 100 else { return nil }
+
+            // Linear approximation: scale IOKit's time-to-100% to time-to-upperBound
+            let remaining = upper - state.percentage
+            let total = 100 - state.percentage
+            let estimated = Int(round(Double(timeToCharge) * Double(remaining) / Double(total)))
+            guard estimated > 0 else { return nil }
+            return (estimated, "until \(upper)%")
+        }
+
+        // No limit active
+        if state.isCharging {
+            guard let timeToCharge = state.timeToCharge, timeToCharge > 0, timeToCharge < 6000 else { return nil }
+            return (timeToCharge, "until full")
+        }
+
+        return nil
+    }
+
+    private func formatMinutes(_ minutes: Int) -> String {
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 {
+            return "\(h):\(String(format: "%02d", m))"
+        }
+        return "\(m)min"
+    }
+
     // MARK: - Composite image (text + battery icon in one image, tight spacing)
 
     private func updateStatusBarImage(state: BatteryState) {
@@ -74,7 +131,11 @@ class StatusBarController {
         case .percentage:
             text = "\(state.percentage)%"
         case .timeRemaining:
-            text = state.timeRemainingFormatted
+            if let time = effectiveTimeRemaining() {
+                text = formatMinutes(time.minutes)
+            } else {
+                text = nil
+            }
         case .iconOnly:
             text = nil
         }
@@ -159,10 +220,9 @@ class StatusBarController {
         }
         menu.addItem(infoItem("\(currentState.percentage)% — \(statusText)", bold: true))
 
-        // Line 2: 2h32min until full (optional)
-        if let timeStr = currentState.timeRemainingFormatted {
-            let label = currentState.isCharging ? "until full" : "remaining"
-            menu.addItem(infoItem("\(timeStr) \(label)"))
+        // Line 2: 1:32 until 85% (optional, context-aware)
+        if let time = effectiveTimeRemaining() {
+            menu.addItem(infoItem("\(formatMinutes(time.minutes)) \(time.label)"))
         }
 
         // Line 3: Power adapter: 60W (when plugged in)

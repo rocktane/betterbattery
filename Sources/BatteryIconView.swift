@@ -5,6 +5,7 @@ class BatteryIconView: NSView {
     var isCharging: Bool = false
     var isPluggedIn: Bool = false
     var chargeLimitActive: Bool = false
+    var topUpActive: Bool = false
 
     private let batteryWidth: CGFloat = 22.0
     private let batteryHeight: CGFloat = 12.0
@@ -18,11 +19,12 @@ class BatteryIconView: NSView {
         return NSSize(width: batteryWidth + terminalWidth + 1, height: 20)
     }
 
-    func update(percentage: Int, isCharging: Bool, isPluggedIn: Bool, chargeLimitActive: Bool) {
+    func update(percentage: Int, isCharging: Bool, isPluggedIn: Bool, chargeLimitActive: Bool, topUpActive: Bool) {
         self.percentage = percentage
         self.isCharging = isCharging
         self.isPluggedIn = isPluggedIn
         self.chargeLimitActive = chargeLimitActive
+        self.topUpActive = topUpActive
         needsDisplay = true
     }
 
@@ -111,7 +113,9 @@ class BatteryIconView: NSView {
             let centerX = batteryWidth / 2.0
             let centerY = yOffset + batteryHeight / 2.0
 
-            if chargeLimitActive {
+            if topUpActive {
+                drawPlus(ctx: ctx, centerX: centerX, centerY: centerY)
+            } else if chargeLimitActive {
                 drawPause(ctx: ctx, centerX: centerX, centerY: centerY)
             } else if isCharging {
                 drawBolt(ctx: ctx, centerX: centerX, centerY: centerY)
@@ -187,6 +191,24 @@ class BatteryIconView: NSView {
         plug.lineWidth = 1
         plug.stroke()
         ctx.restoreGState()
+    }
+
+    private func drawPlus(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+        let armLength: CGFloat = 2.5
+        let lineWidth: CGFloat = 1.5
+
+        let plus = NSBezierPath()
+        // Horizontal bar
+        plus.move(to: CGPoint(x: centerX - armLength, y: centerY))
+        plus.line(to: CGPoint(x: centerX + armLength, y: centerY))
+        // Vertical bar
+        plus.move(to: CGPoint(x: centerX, y: centerY - armLength))
+        plus.line(to: CGPoint(x: centerX, y: centerY + armLength))
+
+        NSColor.white.set()
+        plus.lineWidth = lineWidth
+        plus.lineCapStyle = .round
+        plus.stroke()
     }
 
     private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
