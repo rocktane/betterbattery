@@ -20,6 +20,9 @@ $(APP_BUNDLE): $(SOURCES) Info.plist BetterBattery.entitlements
 	@mkdir -p $(APP_BUNDLE)/Contents/Resources
 	$(SWIFTC) $(SWIFT_FLAGS) $(FRAMEWORKS) $(SOURCES) -o $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
 	@cp Info.plist $(APP_BUNDLE)/Contents/Info.plist
+	@xcrun actool Assets/Assets.xcassets --compile $(APP_BUNDLE)/Contents/Resources \
+		--platform macosx --minimum-deployment-target 12.0 \
+		--app-icon AppIcon --output-partial-info-plist $(BUILD_DIR)/partial.plist 2>/dev/null
 	@which codesign >/dev/null 2>&1 && \
 		codesign --force --sign - --entitlements BetterBattery.entitlements --options runtime $(APP_BUNDLE) || \
 		echo "Warning: codesign not found, skipping hardened runtime"

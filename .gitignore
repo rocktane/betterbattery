@@ -5,6 +5,7 @@ build/
 *.dmg
 *.pkg
 *.dSYM/
+Assets/AppIcon.icns
 
 # === Swift / Xcode (in case opened accidentally) ===
 .build/
