@@ -192,6 +192,17 @@ class ChargeLimiter {
         }
     }
 
+    private func reconcileChargingStateWithSMC() {
+        guard let smcChargingEnabled = smc.isChargingEnabledInSMC() else { return }
+        guard smcChargingEnabled != chargingEnabled else { return }
+
+        bbLog.warning(
+            "Charging state desync detected — internal=\(self.chargingEnabled ? "enabled" : "disabled"), SMC=\(smcChargingEnabled ? "enabled" : "disabled")"
+        )
+        chargingEnabled = smcChargingEnabled
+        onStateChange?()
+    }
+
     // MARK: - Main check
 
     func check(percentage: Int, isPluggedIn: Bool, temperature: Double) {
@@ -220,6 +231,9 @@ class ChargeLimiter {
         }
 
         guard isPluggedIn else { return }
+
+        // Self-heal if another tool or a missed event changed the hardware state.
+        reconcileChargingStateWithSMC()
 
         // Plug-in transition: re-enable charging if below limit
         if !previouslyPluggedIn && isPluggedIn && !chargingEnabled && percentage < upperBound {

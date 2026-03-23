@@ -16,6 +16,7 @@ class StatusBarController {
 
     private var currentState = BatteryState()
     private var displayMode: MenuBarDisplayMode = .percentage
+    private let batteryHistory = BatteryHistory()
 
     // Auto Low Power Mode
     private enum AutoLPMState { case idle, activated, userOverridden }
@@ -43,6 +44,7 @@ class StatusBarController {
 
     func update(state: BatteryState) {
         currentState = state
+        batteryHistory.record(percentage: state.percentage, isCharging: state.isCharging)
 
         iconView.update(
             percentage: state.percentage,
@@ -118,7 +120,7 @@ class StatusBarController {
         if h > 0 {
             return "\(h):\(String(format: "%02d", m))"
         }
-        return "\(m)min"
+        return "0:\(String(format: "%02d", m))"
     }
 
     // MARK: - Composite image (text + battery icon in one image, tight spacing)
@@ -241,6 +243,18 @@ class StatusBarController {
         // Line 6: Uptime: 6d 0h 42min
         let uptime = ProcessInfo.processInfo.systemUptime
         menu.addItem(infoItem("Uptime: \(formatUptime(uptime))"))
+
+        // Battery history graph
+        let graphWidth: CGFloat = 280
+        let graphHeight: CGFloat = 120
+        let graphView = BatteryGraphView(frame: NSRect(x: 0, y: 0, width: graphWidth, height: graphHeight))
+        graphView.history = batteryHistory
+        let graphContainer = NSView(frame: NSRect(x: 0, y: 0, width: graphWidth + 20, height: graphHeight + 8))
+        graphView.frame.origin = CGPoint(x: 10, y: 4)
+        graphContainer.addSubview(graphView)
+        let graphItem = NSMenuItem()
+        graphItem.view = graphContainer
+        menu.addItem(graphItem)
 
         menu.addItem(.separator())
 
@@ -367,6 +381,11 @@ class StatusBarController {
 
         menu.addItem(.separator())
 
+        // About
+        let aboutItem = NSMenuItem(title: "About BetterBattery", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
         // Uninstall
         let uninstallItem = NSMenuItem(title: "Uninstall", action: #selector(uninstall), keyEquivalent: "")
         uninstallItem.target = self
@@ -488,6 +507,90 @@ class StatusBarController {
             LaunchAtLogin.enable()
         }
         rebuildMenu()
+    }
+
+    @objc private func showAbout() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "About BetterBattery"
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.center()
+
+        let contentView = NSView(frame: panel.contentView!.bounds)
+
+        // App icon
+        let iconView = NSImageView(frame: NSRect(x: 126, y: 170, width: 48, height: 48))
+        iconView.image = NSApp.applicationIconImage
+        contentView.addSubview(iconView)
+
+        // App name
+        let nameLabel = NSTextField(labelWithString: "BetterBattery")
+        nameLabel.font = NSFont.boldSystemFont(ofSize: 16)
+        nameLabel.alignment = .center
+        nameLabel.frame = NSRect(x: 0, y: 142, width: 300, height: 22)
+        contentView.addSubview(nameLabel)
+
+        // Version
+        let versionLabel = NSTextField(labelWithString: "v1.1.1")
+        versionLabel.font = NSFont.systemFont(ofSize: 12)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.alignment = .center
+        versionLabel.frame = NSRect(x: 0, y: 122, width: 300, height: 18)
+        contentView.addSubview(versionLabel)
+
+        // Description
+        let descLabel = NSTextField(labelWithString: "Monitor and limit battery charging on macOS")
+        descLabel.font = NSFont.systemFont(ofSize: 12)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.alignment = .center
+        descLabel.frame = NSRect(x: 0, y: 96, width: 300, height: 18)
+        contentView.addSubview(descLabel)
+
+        // Author
+        let authorLabel = NSTextField(labelWithString: "By rocktane")
+        authorLabel.font = NSFont.systemFont(ofSize: 12)
+        authorLabel.alignment = .center
+        authorLabel.frame = NSRect(x: 0, y: 70, width: 300, height: 18)
+        contentView.addSubview(authorLabel)
+
+        // GitHub link
+        let linkLabel = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: "github.com/rocktane/betterbattery",
+            attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .font: NSFont.systemFont(ofSize: 12),
+                .cursor: NSCursor.pointingHand
+            ]
+        ))
+        linkLabel.alignment = .center
+        linkLabel.frame = NSRect(x: 0, y: 48, width: 300, height: 18)
+        linkLabel.isSelectable = false
+        contentView.addSubview(linkLabel)
+
+        let clickGesture = NSClickGestureRecognizer(target: self, action: #selector(openGitHub))
+        linkLabel.addGestureRecognizer(clickGesture)
+
+        // License
+        let licenseLabel = NSTextField(labelWithString: "MIT License")
+        licenseLabel.font = NSFont.systemFont(ofSize: 11)
+        licenseLabel.textColor = .tertiaryLabelColor
+        licenseLabel.alignment = .center
+        licenseLabel.frame = NSRect(x: 0, y: 20, width: 300, height: 16)
+        contentView.addSubview(licenseLabel)
+
+        panel.contentView = contentView
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func openGitHub() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/rocktane/betterbattery")!)
     }
 
     @objc private func uninstall() {

@@ -242,6 +242,44 @@ class SMCController {
         return false
     }
 
+    /// Returns true when charging is enabled in SMC, false when explicitly disabled.
+    /// Returns nil if the current platform key is unreadable or has an unexpected value.
+    func isChargingEnabledInSMC() -> Bool? {
+        if supportsTahoe {
+            guard let output = readKey("CHTE"),
+                  let hex = extractHexBytes(from: output) else {
+                return nil
+            }
+            switch hex {
+            case "00000000":
+                return true
+            case "01000000":
+                return false
+            default:
+                bbLog.warning("Unexpected CHTE value: \(hex)")
+                return nil
+            }
+        } else if supportsLegacy {
+            guard let outputB = readKey("CH0B"),
+                  let outputC = readKey("CH0C"),
+                  let hexB = extractHexBytes(from: outputB),
+                  let hexC = extractHexBytes(from: outputC) else {
+                return nil
+            }
+
+            if hexB == "00" && hexC == "00" {
+                return true
+            }
+            if hexB == "02" && hexC == "02" {
+                return false
+            }
+
+            bbLog.warning("Unexpected legacy charging values: CH0B=\(hexB), CH0C=\(hexC)")
+            return nil
+        }
+        return nil
+    }
+
     func enableDischarge() -> Bool {
         if supportsTahoe {
             return writeKey("CHIE", value: "08")
