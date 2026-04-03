@@ -40,6 +40,15 @@ class StatusBarController {
             guard let self = self else { return }
             self.update(state: self.currentState)
         }
+
+        NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            self.update(state: self.currentState)
+        }
     }
 
     func update(state: BatteryState) {
@@ -51,7 +60,8 @@ class StatusBarController {
             isCharging: state.isCharging,
             isPluggedIn: state.isPluggedIn,
             chargeLimitActive: chargeLimiter.isActive && !chargeLimiter.chargingEnabled,
-            topUpActive: chargeLimiter.topUpActive
+            topUpActive: chargeLimiter.topUpActive,
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled
         )
 
         updateStatusBarImage(state: state)
@@ -496,7 +506,8 @@ class StatusBarController {
         try? process.run()
         process.waitUntilExit()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.rebuildMenu()
+            guard let self = self else { return }
+            self.update(state: self.currentState)
         }
     }
 

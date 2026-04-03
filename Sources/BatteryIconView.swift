@@ -6,6 +6,7 @@ class BatteryIconView: NSView {
     var isPluggedIn: Bool = false
     var chargeLimitActive: Bool = false
     var topUpActive: Bool = false
+    var isLowPowerModeEnabled: Bool = false
 
     private let batteryWidth: CGFloat = 22.0
     private let batteryHeight: CGFloat = 12.0
@@ -14,17 +15,22 @@ class BatteryIconView: NSView {
     private let cornerRadius: CGFloat = 2.0
     private let borderWidth: CGFloat = 1.0
 
+    private let leafWidth: CGFloat = 7.0
+    private let leafGap: CGFloat = 2.0
+
     override var intrinsicContentSize: NSSize {
         // Height accommodates bolt tips extending beyond battery body
-        return NSSize(width: batteryWidth + terminalWidth + 1, height: 20)
+        let extraWidth = isLowPowerModeEnabled ? leafGap + leafWidth : 0
+        return NSSize(width: batteryWidth + terminalWidth + 1 + extraWidth, height: 20)
     }
 
-    func update(percentage: Int, isCharging: Bool, isPluggedIn: Bool, chargeLimitActive: Bool, topUpActive: Bool) {
+    func update(percentage: Int, isCharging: Bool, isPluggedIn: Bool, chargeLimitActive: Bool, topUpActive: Bool, isLowPowerModeEnabled: Bool) {
         self.percentage = percentage
         self.isCharging = isCharging
         self.isPluggedIn = isPluggedIn
         self.chargeLimitActive = chargeLimitActive
         self.topUpActive = topUpActive
+        self.isLowPowerModeEnabled = isLowPowerModeEnabled
         needsDisplay = true
     }
 
@@ -122,6 +128,13 @@ class BatteryIconView: NSView {
             } else {
                 drawPlug(ctx: ctx, centerX: centerX, centerY: centerY)
             }
+        }
+
+        // 5. Low Power Mode leaf indicator
+        if isLowPowerModeEnabled {
+            let leafX = batteryWidth + terminalWidth + leafGap
+            let leafCenterY = yOffset + batteryHeight / 2.0
+            drawLowPowerDot(ctx: ctx, x: leafX, centerY: leafCenterY)
         }
     }
 
@@ -236,5 +249,20 @@ class BatteryIconView: NSView {
         tilde.lineWidth = lineWidth
         tilde.lineCapStyle = .round
         tilde.stroke()
+    }
+
+    // MARK: - Low Power Mode indicator
+
+    private func drawLowPowerDot(ctx: CGContext, x: CGFloat, centerY: CGFloat) {
+        let dotSize: CGFloat = 5.0
+        let dotRect = NSRect(
+            x: x + (leafWidth - dotSize) / 2.0,
+            y: centerY - dotSize / 2.0,
+            width: dotSize,
+            height: dotSize
+        )
+        let dot = NSBezierPath(ovalIn: dotRect)
+        NSColor.systemOrange.set()
+        dot.fill()
     }
 }
