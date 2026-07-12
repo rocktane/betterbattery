@@ -14,6 +14,7 @@ struct BatteryState {
     var temperature: Double = 0.0  // °C
     var amperage: Int = 0          // mA (negative = discharging)
     var adapterWatts: Int = 0      // AC adapter rated wattage
+    var systemPowerIn: Int = 0     // mW actually drawn by the computer (adapter input)
 
     var timeRemaining: Int? {
         if isCharging {
@@ -154,6 +155,12 @@ class BatteryReader {
             }
             if let amperage = props["Amperage"] as? Int {
                 state.amperage = amperage
+            }
+            // Actual power drawn by the computer from the adapter (mW), even when the
+            // battery isn't charging. Present on Apple Silicon under PowerTelemetryData.
+            if let telemetry = props["PowerTelemetryData"] as? [String: Any],
+               let systemPowerIn = telemetry["SystemPowerIn"] as? Int, systemPowerIn > 0 {
+                state.systemPowerIn = systemPowerIn
             }
             // Time values come from IOPowerSources only (same source as Stats app)
         }

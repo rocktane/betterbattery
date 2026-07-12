@@ -1,4 +1,5 @@
 import Cocoa
+import IOKit.pwr_mgt
 
 enum MenuBarDisplayMode: Int {
     case percentage = 0
@@ -6,7 +7,21 @@ enum MenuBarDisplayMode: Int {
     case iconOnly = 2
 }
 
-class StatusBarController {
+/// Borderless panels can't become key by default, which stops their controls from
+/// receiving clicks. Allow it (without becoming main / activating the app).
+final class DropdownPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    // The dropdown anchors its top edge just under the menu bar and grows downward.
+    // Returning the rect unchanged disables AppKit's screen-clamping so the panel keeps
+    // the exact frame we set (it never needs to move once positioned).
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+}
+
+
+class StatusBarController: NSObject, WidgetActionDelegate {
     private var statusItem: NSStatusItem!
     private var iconView: BatteryIconView!
     private let batteryReader: BatteryReader
@@ -18,21 +33,42 @@ class StatusBarController {
     private var displayMode: MenuBarDisplayMode = .percentage
     private let batteryHistory = BatteryHistory()
 
+    // Custom widget dropdown (borderless panel — no arrow, fixed position once shown)
+    private var panel: DropdownPanel!
+    private var effectView: NSVisualEffectView!
+    private var widgetVC: WidgetViewController!
+    private var globalClickMonitor: Any?
+    private var anchorTopY: CGFloat = 0        // screen Y of the panel's top edge, fixed while open
+    private var contentSize: NSSize = NSSize(width: 300, height: 300)
+    private let windowRadius: CGFloat = 16
+
     // Auto Low Power Mode
     private enum AutoLPMState { case idle, activated, userOverridden }
     private var autoLPMThreshold: Int = 0  // 0 = disabled
     private var autoLPMState: AutoLPMState = .idle
 
+    // App theme: 0 = system, 1 = light, 2 = dark
+    private var appTheme: Int = 0
+
+    // Keep-awake (caffeine) power assertion
+    private var caffeineAssertionID: IOPMAssertionID = 0
+    private var caffeineActive = false
+
     init(batteryReader: BatteryReader, chargeLimiter: ChargeLimiter, smc: SMCController) {
         self.batteryReader = batteryReader
         self.chargeLimiter = chargeLimiter
         self.smc = smc
+        super.init()
 
         let savedMode = defaults.integer(forKey: "displayMode")
         displayMode = MenuBarDisplayMode(rawValue: savedMode) ?? .percentage
 
         let savedLPM = defaults.integer(forKey: "autoLPMThreshold")
         autoLPMThreshold = [0, 10, 20, 30, 40, 50].contains(savedLPM) ? savedLPM : 0
+
+        let savedTheme = defaults.integer(forKey: "appTheme")
+        appTheme = [0, 1, 2].contains(savedTheme) ? savedTheme : 0
+        applyAppTheme()
 
         setupStatusItem()
 
@@ -66,7 +102,7 @@ class StatusBarController {
 
         updateStatusBarImage(state: state)
         checkAutoLPM(percentage: state.percentage)
-        rebuildMenu()
+        refreshWidget()
     }
 
     // MARK: - Setup
@@ -74,7 +110,238 @@ class StatusBarController {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         iconView = BatteryIconView()
-        rebuildMenu()
+
+        widgetVC = WidgetViewController()
+        widgetVC.delegate = self
+        // Assign onResize BEFORE the view ever loads. The first layout is triggered the
+        // moment `widgetVC.view` is accessed below; if onResize is still nil at that point,
+        // relayout() falls back to setting `preferredContentSize`, which installs an Auto
+        // Layout constraint that permanently pins the panel to the collapsed height (the
+        // window then snaps back on every setFrame(display:true) via the constraint engine).
+        widgetVC.onResize = { [weak self] size in
+            self?.resizeDropdown(to: size)
+        }
+
+        // Borderless, non-activating panel used as the dropdown (no popover arrow).
+        panel = DropdownPanel(contentRect: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height),
+                              styleMask: [.borderless, .nonactivatingPanel, .resizable],
+                              backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        panel.minSize = NSSize(width: contentSize.width, height: 1)
+        panel.maxSize = NSSize(width: contentSize.width, height: 5000)
+        panel.contentMinSize = NSSize(width: contentSize.width, height: 1)
+        panel.contentMaxSize = NSSize(width: contentSize.width, height: 5000)
+
+        // Rounded container clips both the vibrancy and the content (clipping the
+        // NSVisualEffectView directly leaves a faint edge/border).
+        let container = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        container.wantsLayer = true
+        container.layer?.cornerRadius = windowRadius
+        container.layer?.cornerCurve = .continuous
+        container.layer?.masksToBounds = true
+        container.autoresizingMask = [.width, .height]
+
+        effectView = NSVisualEffectView(frame: container.bounds)
+        effectView.material = .popover
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.autoresizingMask = [.width, .height]
+        container.addSubview(effectView)
+
+        widgetVC.view.frame = container.bounds
+        widgetVC.view.autoresizingMask = [.width, .height]
+        container.addSubview(widgetVC.view)
+        panel.contentView = container
+
+        applyAppTheme()
+
+        statusItem.button?.action = #selector(togglePopover)
+        statusItem.button?.target = self
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    // MARK: - Dropdown
+
+    @objc private func togglePopover() {
+        if panel.isVisible {
+            closeDropdown()
+        } else {
+            openDropdown()
+        }
+    }
+
+    private func openDropdown() {
+        guard let button = statusItem.button, let buttonWindow = button.window else { return }
+        refreshWidget()
+        widgetVC.applyModel(force: true)
+        widgetVC.layoutNow()   // capture the current collapsed size before positioning
+
+        // Position under the status item, centred, clamped to the screen. Captured once.
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        let buttonScreenRect = buttonWindow.convertToScreen(buttonRectInWindow)
+        let screen = buttonWindow.screen ?? NSScreen.main
+        let margin: CGFloat = 8
+        var x = buttonScreenRect.midX - contentSize.width / 2
+        // Top sits just under the menu bar (visibleFrame.maxY = top of the usable area).
+        anchorTopY = (screen?.visibleFrame.maxY ?? buttonScreenRect.minY) - 2
+        if let visible = screen?.visibleFrame {
+            x = min(max(visible.minX + margin, x), visible.maxX - contentSize.width - margin)
+        }
+        let frame = NSRect(x: x, y: anchorTopY - contentSize.height,
+                           width: contentSize.width, height: contentSize.height)
+        panel.setFrame(frame, display: true)
+        panel.alphaValue = 0
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            panel.animator().alphaValue = 1
+        }
+        installClickMonitor()
+    }
+
+    private func closeDropdown() {
+        removeClickMonitor()
+        panel.orderOut(nil)
+        widgetVC.resetSettings()
+    }
+
+    /// Resize the panel to the new content size, keeping its top edge fixed (grows downward).
+    /// The smooth motion comes from the internal content animation (clipping container +
+    /// sliding chevron); the window frame itself snaps (animating it made it jump).
+    ///
+    /// Growing snaps immediately so the revealed cards animate inside an already-tall window.
+    /// Shrinking is deferred until the collapse animation finishes — otherwise the window's
+    /// bottom edge crops the cards while they're still sliding out.
+    private func resizeDropdown(to size: NSSize) {
+        contentSize = size
+        guard panel != nil, panel.isVisible else { return }
+        let frame = NSRect(x: panel.frame.origin.x, y: anchorTopY - size.height,
+                           width: size.width, height: size.height)
+        let shrinking = size.height < panel.frame.height
+        resizeGeneration += 1
+        let gen = resizeGeneration
+        let delay = shrinking ? WidgetViewController.detailAnimationDuration : 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // Skip a stale deferred shrink if a newer resize (e.g. re-expand) has since run.
+            guard let self = self, self.panel != nil, gen == self.resizeGeneration else { return }
+            self.panel.setFrame(frame, display: true)
+        }
+    }
+    private var resizeGeneration = 0
+
+    private func installClickMonitor() {
+        removeClickMonitor()
+        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            guard let self = self, self.panel.isVisible else { return }
+            // Ignore clicks on the status item itself (its button action handles the toggle).
+            if let btnFrame = self.statusItem.button?.window?.frame, btnFrame.contains(NSEvent.mouseLocation) {
+                return
+            }
+            self.closeDropdown()
+        }
+    }
+
+    private func removeClickMonitor() {
+        if let m = globalClickMonitor {
+            NSEvent.removeMonitor(m)
+            globalClickMonitor = nil
+        }
+    }
+
+    // MARK: - Widget model
+
+    private func refreshWidget() {
+        guard widgetVC != nil else { return }
+        var model = WidgetModel()
+        model.percentage = currentState.percentage
+        let status = statusText()
+        model.statusText = status.text
+        model.showStatusPill = !status.sourceOnly
+        model.etaText = etaText()
+        model.isCharging = currentState.isCharging
+        model.limitActive = chargeLimiter.isActive
+        model.limitPercentage = chargeLimiter.limitPercentage
+        model.lowerBound = chargeLimiter.lowerBound
+        model.upperBound = chargeLimiter.upperBound
+        model.topUpActive = chargeLimiter.topUpActive
+        model.stopChargingBeforeSleep = chargeLimiter.stopChargingBeforeSleep
+        model.lowPowerModeOn = ProcessInfo.processInfo.isLowPowerModeEnabled
+        model.displayMode = displayMode
+        model.autoLPMThreshold = autoLPMThreshold
+        model.launchAtLogin = LaunchAtLogin.isEnabled
+        model.appTheme = appTheme
+        model.health = currentState.health
+        model.cycleCount = currentState.cycleCount
+        model.temperature = currentState.temperature
+        model.uptime = formatUptimeCompact(ProcessInfo.processInfo.systemUptime)
+        model.isPluggedIn = currentState.isPluggedIn
+        model.adapterWatts = currentState.adapterWatts
+        // Actual power drawn by the computer: adapter input when available (works even when
+        // the battery isn't charging), otherwise the battery flow (discharge on battery).
+        model.drawWatts = currentState.systemPowerIn > 0
+            ? Int(round(Double(currentState.systemPowerIn) / 1000.0))
+            : Int(round(currentState.voltage * (Double(abs(currentState.amperage)) / 1000.0)))
+        model.powerSource = currentState.isPluggedIn ? "AC Power" : "Battery"
+        model.caffeineActive = caffeineActive
+
+        widgetVC.model = model
+        if panel != nil && panel.isVisible {
+            widgetVC.applyModel()
+        }
+    }
+
+    /// Text shown under the bar: the remaining time when known, otherwise a contextual
+    /// message so the line is never empty.
+    private func etaText() -> String {
+        if let t = effectiveTimeRemaining() {
+            return "\(formatMinutesVerbose(t.minutes)) \(t.label)"
+        }
+        guard currentState.isPluggedIn else {
+            return "Estimating time remaining…"   // on battery, time not computed yet
+        }
+        if currentState.percentage >= 100 {
+            return "Fully charged"
+        }
+        if chargeLimiter.isActive && !chargeLimiter.chargingEnabled {
+            // Only claim it's "held at" the limit when actually near it (within the hold band).
+            // Above the band (e.g. 99% with an 80% limit) charging is just paused — the app
+            // doesn't force-discharge, so don't pretend it's sitting at the limit.
+            if currentState.percentage > chargeLimiter.upperBound {
+                return "Above \(chargeLimiter.limitPercentage)% limit"
+            }
+            return "Held at \(chargeLimiter.limitPercentage)%"
+        }
+        if currentState.isCharging {
+            return "Estimating time remaining…"   // charging, time not computed yet
+        }
+        return "On adapter"   // plugged in, idle, below 100%
+    }
+
+    /// The pill text plus whether it merely restates the power source the icon already shows
+    /// (the two idle states). When `sourceOnly` is true the pill collapses to just the icon.
+    private func statusText() -> (text: String, sourceOnly: Bool) {
+        if chargeLimiter.thermalHold && currentState.isPluggedIn {
+            return ("Cooling", false)
+        } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
+            return ("Topping Up", false)
+        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
+            // Charging held by the limiter. Keep the "Paused" pill while held below 100%
+            // (the limit is actively protecting the battery); collapse to just the plug icon
+            // only once genuinely fully charged (100%), same as the other idle states.
+            return ("Paused", currentState.percentage >= 100)
+        } else if currentState.isCharging {
+            return ("Charging", false)
+        } else if currentState.isPluggedIn {
+            return ("Power Adapter", true)   // redundant with the plug icon
+        } else {
+            return ("Battery", true)          // redundant with the battery icon
+        }
     }
 
     // MARK: - Smart time remaining
@@ -86,7 +353,7 @@ class StatusBarController {
         if !state.isPluggedIn {
             // Discharging on battery
             guard let minutes = state.timeToEmpty, minutes > 0, minutes < 6000 else { return nil }
-            return (minutes, "remaining")
+            return (minutes, "left")
         }
 
         // Plugged in
@@ -171,19 +438,30 @@ class StatusBarController {
             textSize = .zero
         }
 
-        let gap: CGFloat = textSize.width > 0 ? 2 : 0
-        let totalWidth = textSize.width + gap + batteryImage.size.width
         let totalHeight = batteryImage.size.height
 
-        let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
+        // Leading coffee-cup glyph when keep-awake is active
+        let cupSide: CGFloat = 13
+        let cupImage = caffeineActive ? tintedCupImage(side: cupSide) : nil
+        let cupW: CGFloat = cupImage != nil ? cupSide : 0
+        let cupGap: CGFloat = cupImage != nil ? 3 : 0
+
+        let gap: CGFloat = textSize.width > 0 ? 2 : 0
+        let totalWidth = cupW + cupGap + textSize.width + gap + batteryImage.size.width
+
+        let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
+            var x: CGFloat = 0
+            if let cup = cupImage {
+                cup.draw(in: NSRect(x: 0, y: (totalHeight - cupSide) / 2, width: cupSide, height: cupSide))
+                x += cupW + cupGap
+            }
             if let text = text, !text.isEmpty {
                 let textY = (totalHeight - textSize.height) / 2
-                (text as NSString).draw(at: NSPoint(x: 0, y: textY), withAttributes: attrs)
+                (text as NSString).draw(at: NSPoint(x: x, y: textY), withAttributes: attrs)
+                x += textSize.width + gap
             }
-
-            let iconX = textSize.width + gap
             batteryImage.draw(
-                in: NSRect(x: iconX, y: 0, width: batteryImage.size.width, height: batteryImage.size.height),
+                in: NSRect(x: x, y: 0, width: batteryImage.size.width, height: batteryImage.size.height),
                 from: .zero,
                 operation: .sourceOver,
                 fraction: 1.0
@@ -194,269 +472,85 @@ class StatusBarController {
         return image
     }
 
-    // MARK: - Menu
+    /// Coffee-cup SF Symbol tinted to the menu bar text color.
+    private func tintedCupImage(side: CGFloat) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "Éveil") else {
+            return nil
+        }
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        let symbol = base.withSymbolConfiguration(cfg) ?? base
+        symbol.isTemplate = true
 
-    private func rebuildMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        // ── Battery info section ──
-
-        func infoItem(_ text: String, bold: Bool = false) -> NSMenuItem {
-            let label = NSTextField(labelWithString: text)
-            label.font = bold ? NSFont.boldSystemFont(ofSize: 13) : NSFont.menuFont(ofSize: 13)
-            label.textColor = .labelColor
-            label.sizeToFit()
-            let container = NSView(frame: NSRect(x: 0, y: 0, width: label.frame.width + 40, height: label.frame.height + 4))
-            label.frame.origin = CGPoint(x: 20, y: 2)
-            container.addSubview(label)
-            let item = NSMenuItem()
-            item.view = container
-            return item
+        // Resolve the tint against the *menu bar's* appearance, not the app's. This image is
+        // drawn eagerly (lockFocus) here, so a plain `NSColor.textColor` would resolve against
+        // whatever appearance is current at build time and come out white on a light menu bar.
+        // (The %/battery are drawn in a deferred handler and already track the menu bar.)
+        var tint = NSColor.textColor
+        if let appearance = statusItem.button?.effectiveAppearance {
+            appearance.performAsCurrentDrawingAppearance {
+                tint = NSColor.textColor.usingColorSpace(.sRGB) ?? .textColor
+            }
         }
 
-        // Line 1: 94% — Paused (bold)
-        let statusText: String
-        if chargeLimiter.thermalHold && currentState.isPluggedIn {
-            statusText = "Paused (🔥)"
-        } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
-            statusText = "Topping Up"
-        } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
-            statusText = "Paused"
-        } else if currentState.isCharging {
-            statusText = "Charging"
-        } else if currentState.isPluggedIn {
-            statusText = "Power Adapter"
-        } else {
-            statusText = "Battery"
-        }
-        menu.addItem(infoItem("\(currentState.percentage)% — \(statusText)", bold: true))
-
-        // Line 2: 1:32 until 85% (optional, context-aware)
-        if let time = effectiveTimeRemaining() {
-            menu.addItem(infoItem("\(formatMinutes(time.minutes)) \(time.label)"))
-        }
-
-        // Line 3: Power adapter: 60W (when plugged in)
-        if currentState.isPluggedIn && currentState.adapterWatts > 0 {
-            menu.addItem(infoItem("Power adapter: \(currentState.adapterWatts)W"))
-        }
-
-        // Line 4: 30°C • 12.44V • 0W
-        let power = Int(round(currentState.voltage * (Double(abs(currentState.amperage)) / 1000.0)))
-        let temp = Int(round(currentState.temperature))
-        menu.addItem(infoItem(String(format: "%d°C • %.2fV • %dW", temp, currentState.voltage, power)))
-
-        // Line 5: Health: 77% (538 cycles)
-        menu.addItem(infoItem("Health: \(currentState.health)% (\(currentState.cycleCount) cycles)"))
-
-        // Line 6: Uptime: 6d 0h 42min
-        let uptime = ProcessInfo.processInfo.systemUptime
-        menu.addItem(infoItem("Uptime: \(formatUptime(uptime))"))
-
-        // Battery history graph
-        let graphWidth: CGFloat = 280
-        let graphHeight: CGFloat = 120
-        let graphView = BatteryGraphView(frame: NSRect(x: 0, y: 0, width: graphWidth, height: graphHeight))
-        graphView.history = batteryHistory
-        let graphContainer = NSView(frame: NSRect(x: 0, y: 0, width: graphWidth + 20, height: graphHeight + 8))
-        graphView.frame.origin = CGPoint(x: 10, y: 4)
-        graphContainer.addSubview(graphView)
-        let graphItem = NSMenuItem()
-        graphItem.view = graphContainer
-        menu.addItem(graphItem)
-
-        menu.addItem(.separator())
-
-        // ── Charge control section ──
-
-        let limitItem = NSMenuItem(
-            title: chargeLimiter.isActive ? "Limit active at \(chargeLimiter.limitPercentage)%" : "Limit to \(chargeLimiter.limitPercentage)%",
-            action: #selector(toggleChargeLimit),
-            keyEquivalent: ""
-        )
-        limitItem.target = self
-        limitItem.state = chargeLimiter.isActive ? .on : .off
-        menu.addItem(limitItem)
-
-        // Top Up — only when limiter is active
-        if chargeLimiter.isActive {
-            let topUpTitle = chargeLimiter.topUpActive ? "Top Up in progress..." : "Top Up (charge to 100%)"
-            let topUpItem = NSMenuItem(title: topUpTitle, action: #selector(toggleTopUp), keyEquivalent: "")
-            topUpItem.target = self
-            topUpItem.state = chargeLimiter.topUpActive ? .on : .off
-            menu.addItem(topUpItem)
-        }
-
-        menu.addItem(.separator())
-
-        // ── Settings section ──
-
-        // Display mode submenu
-        let displaySubmenu = NSMenu()
-        let modes: [(String, MenuBarDisplayMode)] = [
-            ("Percentage", .percentage),
-            ("Time remaining", .timeRemaining),
-            ("Icon only", .iconOnly)
-        ]
-        for (title, mode) in modes {
-            let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = mode.rawValue
-            item.state = displayMode == mode ? .on : .off
-            displaySubmenu.addItem(item)
-        }
-        let displayItem = NSMenuItem(title: "Menu bar display", action: nil, keyEquivalent: "")
-        displayItem.submenu = displaySubmenu
-        menu.addItem(displayItem)
-
-        // Limit submenu
-        let limitSubmenu = NSMenu()
-        for limit in [60, 70, 80, 90, 100] {
-            let item = NSMenuItem(title: "\(limit)%", action: #selector(setLimit(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = limit
-            item.state = chargeLimiter.limitPercentage == limit ? .on : .off
-            limitSubmenu.addItem(item)
-        }
-        let limitMenuItem = NSMenuItem(title: "Change limit...", action: nil, keyEquivalent: "")
-        limitMenuItem.submenu = limitSubmenu
-        menu.addItem(limitMenuItem)
-
-        // Amplitude submenu
-        let amplitudeSubmenu = NSMenu()
-        let currentLimit = chargeLimiter.limitPercentage
-        for amp in [2, 5, 8, 10] {
-            let lower = max(0, currentLimit - amp)
-            let upper = min(100, currentLimit + amp)
-            let item = NSMenuItem(
-                title: "±\(amp)% (\(lower)-\(upper)%)",
-                action: #selector(setAmplitude(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.tag = amp
-            item.state = chargeLimiter.hysteresisAmplitude == amp ? .on : .off
-            amplitudeSubmenu.addItem(item)
-        }
-        let ampItem = NSMenuItem(title: "Amplitude (±\(chargeLimiter.hysteresisAmplitude)%)", action: nil, keyEquivalent: "")
-        ampItem.submenu = amplitudeSubmenu
-        menu.addItem(ampItem)
-
-        menu.addItem(.separator())
-
-        // Stop charging before sleep toggle
-        let sleepItem = NSMenuItem(
-            title: "Stop charging on sleep",
-            action: #selector(toggleStopChargingBeforeSleep),
-            keyEquivalent: ""
-        )
-        sleepItem.target = self
-        sleepItem.state = chargeLimiter.stopChargingBeforeSleep ? .on : .off
-        menu.addItem(sleepItem)
-
-        // Auto Low Power Mode submenu
-        let autoLPMSubmenu = NSMenu()
-        let lpmOptions: [(String, Int)] = [
-            ("Désactivé", 0), ("10%", 10), ("20%", 20),
-            ("30%", 30), ("40%", 40), ("50%", 50)
-        ]
-        for (title, value) in lpmOptions {
-            let item = NSMenuItem(title: title, action: #selector(setAutoLPMThreshold(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = value
-            item.state = autoLPMThreshold == value ? .on : .off
-            autoLPMSubmenu.addItem(item)
-        }
-        let autoLPMItem = NSMenuItem(title: "Auto Low Power Mode", action: nil, keyEquivalent: "")
-        autoLPMItem.submenu = autoLPMSubmenu
-        autoLPMItem.state = autoLPMThreshold > 0 ? .on : .off
-        menu.addItem(autoLPMItem)
-
-        // Low Power Mode toggle
-        let lowPowerItem = NSMenuItem(
-            title: "Low Power Mode",
-            action: #selector(toggleLowPowerMode),
-            keyEquivalent: ""
-        )
-        lowPowerItem.target = self
-        lowPowerItem.state = ProcessInfo.processInfo.isLowPowerModeEnabled ? .on : .off
-        menu.addItem(lowPowerItem)
-
-        // Launch at login
-        let launchItem = NSMenuItem(title: "Launch at login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-        launchItem.target = self
-        launchItem.state = LaunchAtLogin.isEnabled ? .on : .off
-        menu.addItem(launchItem)
-
-        menu.addItem(.separator())
-
-        // About
-        let aboutItem = NSMenuItem(title: "About BetterBattery", action: #selector(showAbout), keyEquivalent: "")
-        aboutItem.target = self
-        menu.addItem(aboutItem)
-
-        // Uninstall
-        let uninstallItem = NSMenuItem(title: "Uninstall", action: #selector(uninstall), keyEquivalent: "")
-        uninstallItem.target = self
-        menu.addItem(uninstallItem)
-
-        // Quit
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        let size = NSSize(width: side, height: side)
+        let out = NSImage(size: size)
+        out.lockFocus()
+        tint.set()
+        let rect = NSRect(origin: .zero, size: size)
+        symbol.draw(in: rect)
+        rect.fill(using: .sourceAtop)
+        out.unlockFocus()
+        return out
     }
 
-    // MARK: - Actions
+    // MARK: - Actions (WidgetActionDelegate)
 
-    @objc private func toggleChargeLimit() {
+    func widgetToggleLimit() {
         if chargeLimiter.isActive {
             chargeLimiter.stop()
         } else {
             chargeLimiter.start()
         }
-        rebuildMenu()
+        refreshWidget()
     }
 
-    @objc private func toggleTopUp() {
+    func widgetToggleTopUp() {
         if chargeLimiter.topUpActive {
             chargeLimiter.deactivateTopUp()
         } else {
             chargeLimiter.activateTopUp()
         }
-        rebuildMenu()
+        refreshWidget()
     }
 
-    @objc private func setDisplayMode(_ sender: NSMenuItem) {
-        displayMode = MenuBarDisplayMode(rawValue: sender.tag) ?? .percentage
+    func widgetSetDisplayMode(_ mode: MenuBarDisplayMode) {
+        displayMode = mode
         defaults.set(displayMode.rawValue, forKey: "displayMode")
         update(state: currentState)
     }
 
-    @objc private func setLimit(_ sender: NSMenuItem) {
-        chargeLimiter.limitPercentage = sender.tag
+    func widgetSetLimit(_ value: Int) {
+        chargeLimiter.limitPercentage = value
         if chargeLimiter.isActive {
             chargeLimiter.check(percentage: currentState.percentage, isPluggedIn: currentState.isPluggedIn, temperature: currentState.temperature)
         }
-        rebuildMenu()
+        refreshWidget()
     }
 
-    @objc private func setAmplitude(_ sender: NSMenuItem) {
-        chargeLimiter.hysteresisAmplitude = sender.tag
+    func widgetSetAmplitude(_ value: Int) {
+        chargeLimiter.hysteresisAmplitude = value
         if chargeLimiter.isActive {
             chargeLimiter.check(percentage: currentState.percentage, isPluggedIn: currentState.isPluggedIn, temperature: currentState.temperature)
         }
-        rebuildMenu()
+        refreshWidget()
     }
 
-    @objc private func toggleStopChargingBeforeSleep() {
+    func widgetToggleStopChargingBeforeSleep() {
         chargeLimiter.stopChargingBeforeSleep.toggle()
-        rebuildMenu()
+        refreshWidget()
     }
 
-    @objc private func toggleLowPowerMode() {
+    func widgetToggleLowPowerMode() {
         let enable = !ProcessInfo.processInfo.isLowPowerModeEnabled
         setLowPowerMode(enable)
 
@@ -466,12 +560,67 @@ class StatusBarController {
         }
     }
 
-    @objc private func setAutoLPMThreshold(_ sender: NSMenuItem) {
-        autoLPMThreshold = sender.tag
+    func widgetSetAutoLPM(_ threshold: Int) {
+        autoLPMThreshold = threshold
         defaults.set(autoLPMThreshold, forKey: "autoLPMThreshold")
         autoLPMState = .idle
-        rebuildMenu()
+        refreshWidget()
     }
+
+    func widgetToggleCaffeine() {
+        setCaffeine(!caffeineActive)
+    }
+
+    private func setCaffeine(_ on: Bool) {
+        if on {
+            if caffeineAssertionID == 0 {
+                var aid: IOPMAssertionID = 0
+                let result = IOPMAssertionCreateWithName(
+                    kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                    "BetterBattery — Éveil actif" as CFString,
+                    &aid
+                )
+                if result == kIOReturnSuccess {
+                    caffeineAssertionID = aid
+                    caffeineActive = true
+                } else {
+                    bbLog.warning("Failed to create keep-awake assertion (\(result))")
+                }
+            }
+        } else {
+            if caffeineAssertionID != 0 {
+                IOPMAssertionRelease(caffeineAssertionID)
+                caffeineAssertionID = 0
+            }
+            caffeineActive = false
+        }
+        updateStatusBarImage(state: currentState)
+        refreshWidget()
+    }
+
+    func widgetSetTheme(_ mode: Int) {
+        appTheme = [0, 1, 2].contains(mode) ? mode : 0
+        defaults.set(appTheme, forKey: "appTheme")
+        applyAppTheme()
+        refreshWidget()
+    }
+
+    private func applyAppTheme() {
+        let appearance: NSAppearance?
+        switch appTheme {
+        case 1: appearance = NSAppearance(named: .aqua)
+        case 2: appearance = NSAppearance(named: .darkAqua)
+        default: appearance = nil   // follow system
+        }
+        NSApp.appearance = appearance
+        panel?.appearance = appearance
+        effectView?.appearance = appearance
+    }
+
+    func widgetShowAbout() { showAbout() }
+    func widgetUninstall() { uninstall() }
+    func widgetQuit() { quit() }
 
     private func checkAutoLPM(percentage: Int) {
         guard autoLPMThreshold > 0, percentage > 0 else { return }
@@ -511,13 +660,13 @@ class StatusBarController {
         }
     }
 
-    @objc private func toggleLaunchAtLogin() {
+    func widgetToggleLaunchAtLogin() {
         if LaunchAtLogin.isEnabled {
             LaunchAtLogin.disable()
         } else {
             LaunchAtLogin.enable()
         }
-        rebuildMenu()
+        refreshWidget()
     }
 
     @objc private func showAbout() {
@@ -570,13 +719,16 @@ class StatusBarController {
         contentView.addSubview(authorLabel)
 
         // GitHub link
+        let linkParagraph = NSMutableParagraphStyle()
+        linkParagraph.alignment = .center
         let linkLabel = NSTextField(labelWithAttributedString: NSAttributedString(
             string: "github.com/rocktane/betterbattery",
             attributes: [
                 .foregroundColor: NSColor.linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue,
                 .font: NSFont.systemFont(ofSize: 12),
-                .cursor: NSCursor.pointingHand
+                .cursor: NSCursor.pointingHand,
+                .paragraphStyle: linkParagraph
             ]
         ))
         linkLabel.alignment = .center
@@ -637,6 +789,26 @@ class StatusBarController {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    /// Verbose remaining time in English, e.g. "12 minutes" or "1 hour 23 minutes".
+    private func formatMinutesVerbose(_ minutes: Int) -> String {
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 && m > 0 { return "\(h) hour\(h > 1 ? "s" : "") \(m) minute\(m > 1 ? "s" : "")" }
+        if h > 0 { return "\(h) hour\(h > 1 ? "s" : "")" }
+        return "\(m) minute\(m > 1 ? "s" : "")"
+    }
+
+    /// Compact single-unit uptime in full words: days if ≥1 day, else hours if ≥1 h, else minutes.
+    private func formatUptimeCompact(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let days = total / 86400
+        let hours = total / 3600
+        let minutes = total / 60
+        if days >= 1 { return "\(days) day\(days > 1 ? "s" : "")" }
+        if hours >= 1 { return "\(hours) hour\(hours > 1 ? "s" : "")" }
+        return "\(minutes) minute\(minutes > 1 ? "s" : "")"
     }
 
     private func formatUptime(_ seconds: TimeInterval) -> String {
