@@ -5,9 +5,18 @@ APP_BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR = /Applications
 SOURCES = $(wildcard Sources/*.swift)
 
+# Stable signing identity: first "Apple Development" certificate in the keychain,
+# falling back to ad-hoc ("-"). A stable identity keeps the code signature's designated
+# requirement identical across rebuilds, so Keychain items (SMC hash) stay accessible
+# without re-prompting for the login keychain password.
+SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/{print $$2; exit}')
+ifeq ($(SIGN_IDENTITY),)
+SIGN_IDENTITY = -
+endif
+
 SWIFTC = swiftc
 SWIFT_FLAGS = -O -whole-module-optimization -target arm64-apple-macosx12.0
-FRAMEWORKS = -framework Cocoa -framework IOKit
+FRAMEWORKS = -framework Cocoa -framework IOKit -framework UserNotifications
 
 .PHONY: all build install uninstall clean release init-github
 
@@ -24,7 +33,7 @@ $(APP_BUNDLE): $(SOURCES) Info.plist BetterBattery.entitlements
 		--platform macosx --minimum-deployment-target 12.0 \
 		--app-icon AppIcon --output-partial-info-plist $(BUILD_DIR)/partial.plist 2>/dev/null
 	@which codesign >/dev/null 2>&1 && \
-		codesign --force --sign - --entitlements BetterBattery.entitlements --options runtime $(APP_BUNDLE) || \
+		codesign --force --sign "$(SIGN_IDENTITY)" --entitlements BetterBattery.entitlements --options runtime $(APP_BUNDLE) || \
 		echo "Warning: codesign not found, skipping hardened runtime"
 	@echo "Built $(APP_BUNDLE)"
 
@@ -39,7 +48,10 @@ uninstall:
 	@rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
 	@rm -f ~/Library/LaunchAgents/$(BUNDLE_ID).plist
 	@sudo rm -f /etc/sudoers.d/battery
-	@echo "Uninstalled."
+	@security delete-generic-password -s com.betterbattery.smc-hash >/dev/null 2>&1 || true
+	@rm -rf ~/Library/Application\ Support/BetterBattery
+	@defaults delete $(BUNDLE_ID) >/dev/null 2>&1 || true
+	@echo "Uninstalled (app, LaunchAgent, sudoers, Keychain item, history, preferences)."
 
 clean:
 	@rm -rf $(BUILD_DIR)
