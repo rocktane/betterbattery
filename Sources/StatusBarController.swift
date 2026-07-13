@@ -20,6 +20,22 @@ final class DropdownPanel: NSPanel {
     }
 }
 
+/// Theme-aware flat tint over the window's vibrancy: #313131 in dark, lighter grey in light.
+private final class WindowTintView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        autoresizingMask = [.width, .height]
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateLayer() {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.backgroundColor = (dark
+            ? NSColor(srgbRed: 0x31/255.0, green: 0x31/255.0, blue: 0x31/255.0, alpha: 0.20)
+            : NSColor(srgbRed: 0xD8/255.0, green: 0xD8/255.0, blue: 0xD8/255.0, alpha: 0.20)).cgColor
+    }
+}
 
 class StatusBarController: NSObject, WidgetActionDelegate {
     private var statusItem: NSStatusItem!
@@ -102,7 +118,11 @@ class StatusBarController: NSObject, WidgetActionDelegate {
 
         updateStatusBarImage(state: state)
         checkAutoLPM(percentage: state.percentage)
+        checkDischarge(state: state)
         refreshWidget()
+        if historyWindow?.isVisible == true {
+            historyGraphView?.needsDisplay = true
+        }
     }
 
     // MARK: - Setup
@@ -152,6 +172,12 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         effectView.state = .active
         effectView.autoresizingMask = [.width, .height]
         container.addSubview(effectView)
+
+        // Flat tint at 20% over the vibrancy, under the content:
+        // #313131 in dark theme, a lighter grey in light theme.
+        let tintView = WindowTintView(frame: container.bounds)
+        tintView.autoresizingMask = [.width, .height]
+        container.addSubview(tintView)
 
         widgetVC.view.frame = container.bounds
         widgetVC.view.autoresizingMask = [.width, .height]
@@ -279,7 +305,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         model.health = currentState.health
         model.cycleCount = currentState.cycleCount
         model.temperature = currentState.temperature
-        model.uptime = formatUptimeCompact(ProcessInfo.processInfo.systemUptime)
+        model.uptime = formatUptimeCompact(bootUptime())
         model.isPluggedIn = currentState.isPluggedIn
         model.adapterWatts = currentState.adapterWatts
         // Actual power drawn by the computer: adapter input when available (works even when
@@ -289,6 +315,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             : Int(round(currentState.voltage * (Double(abs(currentState.amperage)) / 1000.0)))
         model.powerSource = currentState.isPluggedIn ? "AC Power" : "Battery"
         model.caffeineActive = caffeineActive
+        model.dischargeActive = dischargeActive
 
         widgetVC.model = model
         if panel != nil && panel.isVisible {
@@ -315,7 +342,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             if currentState.percentage > chargeLimiter.upperBound {
                 return "Above \(chargeLimiter.limitPercentage)% limit"
             }
-            return "Held at \(chargeLimiter.limitPercentage)%"
+            return "Held at \(chargeLimiter.limitPercentage)% ±\(chargeLimiter.hysteresisAmplitude)%"
         }
         if currentState.isCharging {
             return "Estimating time remaining…"   // charging, time not computed yet
@@ -328,6 +355,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     private func statusText() -> (text: String, sourceOnly: Bool) {
         if chargeLimiter.thermalHold && currentState.isPluggedIn {
             return ("Cooling", false)
+        } else if dischargeActive {
+            return ("Discharging", false)
         } else if chargeLimiter.topUpActive && currentState.isPluggedIn {
             return ("Topping Up", false)
         } else if chargeLimiter.isActive && !chargeLimiter.chargingEnabled && currentState.isPluggedIn {
@@ -571,6 +600,51 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         setCaffeine(!caffeineActive)
     }
 
+    // MARK: - Active discharge (drain to the limit while plugged in)
+
+    private(set) var dischargeActive = false
+
+    func widgetToggleDischarge() {
+        if dischargeActive {
+            stopDischarge(notify: false)
+        } else {
+            guard smc.enableDischarge() else {
+                bbLog.warning("Failed to enable discharge")
+                return
+            }
+            dischargeActive = true
+            bbLog.info("Active discharge started at \(self.currentState.percentage)%")
+        }
+        updateStatusBarImage(state: currentState)
+        refreshWidget()
+    }
+
+    /// Stop draining (SMC reconnects the adapter). Called on target reached, unplug, or toggle.
+    func stopDischarge(notify: Bool) {
+        guard dischargeActive else { return }
+        if !smc.disableDischarge() {
+            bbLog.error("Failed to disable discharge — retrying once")
+            _ = smc.disableDischarge()
+        }
+        dischargeActive = false
+        if notify {
+            Notifier.send("Discharge complete",
+                          "Battery drained to \(currentState.percentage)% — back on the adapter.",
+                          id: "discharge")
+        }
+        bbLog.info("Active discharge stopped at \(self.currentState.percentage)%")
+    }
+
+    /// Auto-stop the drain when the limit is reached or the charger is unplugged.
+    private func checkDischarge(state: BatteryState) {
+        guard dischargeActive else { return }
+        if !state.isPluggedIn {
+            stopDischarge(notify: false)
+        } else if state.percentage <= chargeLimiter.limitPercentage {
+            stopDischarge(notify: true)
+        }
+    }
+
     private func setCaffeine(_ on: Bool) {
         if on {
             if caffeineAssertionID == 0 {
@@ -618,7 +692,42 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         effectView?.appearance = appearance
     }
 
+    /// Flush the battery history to disk (called on app termination).
+    func saveHistory() { batteryHistory.saveNow() }
+
+    func widgetShowHistory() { showHistory() }
     func widgetShowAbout() { showAbout() }
+
+    // MARK: - History window
+
+    private var historyWindow: NSWindow?
+    private var historyGraphView: BatteryGraphView?
+
+    private func showHistory() {
+        closeDropdown()
+        if let w = historyWindow {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let graph = BatteryGraphView(frame: NSRect(x: 0, y: 0, width: 560, height: 280))
+        graph.history = batteryHistory
+        graph.autoresizingMask = [.width, .height]
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 280),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = "Battery History — Last 7 Days"
+        window.contentView = graph
+        window.minSize = NSSize(width: 360, height: 200)
+        window.isReleasedWhenClosed = false
+        window.center()
+        historyWindow = window
+        historyGraphView = graph
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     func widgetUninstall() { uninstall() }
     func widgetQuit() { quit() }
 
@@ -633,11 +742,18 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             if percentage <= autoLPMThreshold && !isPluggedIn {
                 setLowPowerMode(true)
                 autoLPMState = .activated
+                Notifier.send("Low Power Mode enabled",
+                              "Battery at \(percentage)% — Low Power Mode turned on automatically.",
+                              id: "auto-lpm")
             }
         case .activated:
             if percentage >= disableThreshold || isPluggedIn {
                 setLowPowerMode(false)
                 autoLPMState = .idle
+                Notifier.send("Low Power Mode disabled",
+                              isPluggedIn ? "Charger connected — Low Power Mode turned off automatically."
+                                          : "Battery back to \(percentage)% — Low Power Mode turned off automatically.",
+                              id: "auto-lpm")
             }
         case .userOverridden:
             if percentage >= disableThreshold || isPluggedIn {
@@ -798,6 +914,18 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         if h > 0 && m > 0 { return "\(h) hour\(h > 1 ? "s" : "") \(m) minute\(m > 1 ? "s" : "")" }
         if h > 0 { return "\(h) hour\(h > 1 ? "s" : "")" }
         return "\(m) minute\(m > 1 ? "s" : "")"
+    }
+
+    /// Wall-clock time since boot, including time spent asleep (matches the `uptime` command).
+    /// `ProcessInfo.systemUptime` excludes sleep, which understates uptime badly on laptops.
+    private func bootUptime() -> TimeInterval {
+        var boottime = timeval()
+        var size = MemoryLayout<timeval>.size
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &boottime, &size, nil, 0) == 0, boottime.tv_sec > 0 else {
+            return ProcessInfo.processInfo.systemUptime
+        }
+        return Date().timeIntervalSince1970 - TimeInterval(boottime.tv_sec)
     }
 
     /// Compact single-unit uptime in full words: days if ≥1 day, else hours if ≥1 h, else minutes.
