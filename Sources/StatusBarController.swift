@@ -613,6 +613,9 @@ class StatusBarController: NSObject, WidgetActionDelegate {
                 return
             }
             dischargeActive = true
+            // LED off while draining — the charger is virtually disconnected.
+            chargeLimiter.ledOverride = .off
+            smc.setMagSafeLED(.off)
             bbLog.info("Active discharge started at \(self.currentState.percentage)%")
         }
         updateStatusBarImage(state: currentState)
@@ -627,6 +630,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             _ = smc.disableDischarge()
         }
         dischargeActive = false
+        chargeLimiter.ledOverride = nil
+        smc.setMagSafeLED(.system)   // limiter re-syncs (e.g. back to green) on next check
         if notify {
             Notifier.send("Discharge complete",
                           "Battery drained to \(currentState.percentage)% — back on the adapter.",

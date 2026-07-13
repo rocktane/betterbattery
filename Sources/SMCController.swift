@@ -5,6 +5,7 @@ import os.log
 
 enum MagSafeLEDColor: UInt8 {
     case system = 0x00          // Contrôle par macOS (défaut)
+    case off = 0x01             // Éteinte (décharge active en cours)
     case green = 0x03           // Vert fixe (limite atteinte)
     case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }

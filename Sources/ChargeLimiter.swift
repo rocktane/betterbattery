@@ -302,9 +302,15 @@ class ChargeLimiter {
         syncMagSafeLED(percentage: percentage)
     }
 
+    /// When set, the LED is forced to this color (e.g. .off during an active discharge)
+    /// instead of following the limiter state. Cleared by StatusBarController.
+    var ledOverride: MagSafeLEDColor? = nil
+
     private func syncMagSafeLED(percentage: Int) {
         let desired: MagSafeLEDColor
-        if thermalHold {
+        if let override = ledOverride {
+            desired = override
+        } else if thermalHold {
             desired = .orangeFastBlink
         } else if !chargingEnabled {
             desired = .green
