@@ -954,9 +954,20 @@ final class WidgetViewController: NSViewController {
         topUpBtn.isActiveState = m.topUpActive
         topUpBtn.isEnabledState = m.limitActive
         dischargeBtn.isActiveState = m.dischargeActive
-        // Draining only makes sense plugged in, above the limit, with the limiter on.
+        // Draining works with or without the limiter — it just needs the adapter and
+        // a percentage above the configured limit (the drain target).
         dischargeBtn.isEnabledState = m.dischargeActive
-            || (m.isPluggedIn && m.limitActive && m.percentage > m.limitPercentage)
+            || (m.isPluggedIn && m.percentage > m.limitPercentage)
+        // Tooltip explains why the button is greyed out when it is.
+        if m.dischargeActive {
+            dischargeBtn.toolTip = "Stop draining and reconnect the adapter"
+        } else if !m.isPluggedIn {
+            dischargeBtn.toolTip = "Plug in the charger to drain — on battery it already discharges naturally"
+        } else if m.percentage <= m.limitPercentage {
+            dischargeBtn.toolTip = "Battery already at or below the \(m.limitPercentage)% limit — nothing to drain"
+        } else {
+            dischargeBtn.toolTip = "Actively discharge the battery down to \(m.limitPercentage)% while plugged in"
+        }
         caffeineBtn.isActiveState = m.caffeineActive
         lpmBtn.isActiveState = m.lowPowerModeOn
 
