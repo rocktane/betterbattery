@@ -17,7 +17,7 @@ jobs:
       sha256: ${{ steps.meta.outputs.sha256 }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Show Swift version
         run: swift --version
@@ -47,7 +47,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           OWNER: ${{ github.repository_owner }}
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/homebrew-tap
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
