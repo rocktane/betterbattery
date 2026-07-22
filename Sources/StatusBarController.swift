@@ -647,13 +647,9 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     }
 
     private func setLowPowerMode(_ enabled: Bool) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        process.arguments = ["-n", "/usr/bin/pmset", "-a", "lowpowermode", enabled ? "1" : "0"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
+        if !smc.setLowPowerMode(enabled) {
+            bbLog.warning("Failed to set Low Power Mode via helper")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
             self.update(state: self.currentState)
@@ -696,7 +692,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         contentView.addSubview(nameLabel)
 
         // Version
-        let versionLabel = NSTextField(labelWithString: "v1.1.1")
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let versionLabel = NSTextField(labelWithString: "v\(appVersion)")
         versionLabel.font = NSFont.systemFont(ofSize: 12)
         versionLabel.textColor = .secondaryLabelColor
         versionLabel.alignment = .center

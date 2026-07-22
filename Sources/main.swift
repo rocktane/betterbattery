@@ -33,6 +33,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        LegacyCleanup.runIfNeeded()
+        HelperManager.ensureRegistered()
+
         smcController = SMCController()
         batteryReader = BatteryReader()
         chargeLimiter = ChargeLimiter(smc: smcController)
@@ -69,37 +72,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         installSignalHandler()
         registerForWakeNotifications()
-        Setup.checkFirstRun()
         batteryReader.start()
 
-        // Post-startup checks (after first battery cycle)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+        // If the helper isn't approved yet, poll until it becomes enabled,
+        // then re-probe capabilities and re-assert the SMC state.
+        if HelperManager.service.status != .enabled || !smcController.isAvailable {
+            startHelperApprovalWatch()
+        }
+    }
+
+    /// Poll the daemon status while the user approves it in System Settings.
+    private var helperWatchTimer: Timer?
+
+    private func startHelperApprovalWatch() {
+        helperWatchTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // Check if sudoers needs reinstallation
-            if self.smcController.needsSudoersReinstall {
-                bbLog.warning("Sudoers reinstallation needed — prompting user")
-                let alert = NSAlert()
-                alert.messageText = "Missing sudo permissions"
-                alert.informativeText = "Sudo permissions are not working correctly. Would you like to reinstall the sudoers rules?"
-                alert.addButton(withTitle: "Reinstall")
-                alert.addButton(withTitle: "Later")
-                alert.alertStyle = .warning
-                if alert.runModal() == .alertFirstButtonReturn {
-                    Setup.installSudoers()
-                }
-            }
-            // Check if SMC binary failed integrity (hash mismatch)
-            if !self.smcController.isAvailable && FileManager.default.fileExists(atPath: "/usr/local/bin/smc") {
-                let alert = NSAlert()
-                alert.messageText = "smc binary modified"
-                alert.informativeText = "The /usr/local/bin/smc binary has changed since the last check. If you updated it intentionally, click 'Trust'."
-                alert.addButton(withTitle: "Trust")
-                alert.addButton(withTitle: "Don't run")
-                alert.alertStyle = .critical
-                if alert.runModal() == .alertFirstButtonReturn {
-                    self.smcController.trustCurrentSMCBinary()
-                    self.smcController.redetectCapabilities()
-                    bbLog.info("User chose to trust updated smc binary")
+            guard HelperManager.service.status == .enabled else { return }
+            self.smcController.redetectCapabilities()
+            if self.smcController.isAvailable {
+                bbLog.info("Helper daemon approved and reachable")
+                self.helperWatchTimer?.invalidate()
+                self.helperWatchTimer = nil
+                if !self.chargeLimiter.isActive {
+                    _ = self.smcController.enableCharging()
+                    self.smcController.setMagSafeLED(.system)
+                } else {
+                    self.batteryReader.refresh()
                 }
             }
         }
@@ -165,6 +163,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(true, forKey: "chargeLimitEnabled")
         }
     }
+}
+
+// Used by `make uninstall` to remove the daemon registration
+if CommandLine.arguments.contains("--uninstall-helper") {
+    HelperManager.unregister()
+    exit(0)
 }
 
 let app = NSApplication.shared

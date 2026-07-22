@@ -16,9 +16,8 @@ Menu bar app for macOS that limits battery charging via SMC to preserve battery 
 
 ## Requirements
 
-- macOS 12+
+- macOS 13+
 - Apple Silicon (M1, M2, M3, ...)
-- The [`smc`](https://github.com/beltex/SMCKit) command-line tool installed at `/usr/local/bin/smc`
 
 ## Install
 
@@ -35,13 +34,16 @@ Download the latest release from the [Releases](../../releases) page, unzip, and
 ### From source
 
 ```bash
+make cert      # one-time: create a local self-signed signing certificate
 make build
 make install
 ```
 
-On first launch the app will ask for your admin password to install a sudoers entry (needed to talk to the SMC).
+On first launch, approve the background helper in System Settings → General → Login Items & Extensions → "Allow in the Background" if prompted.
 
-Since the app is unsigned, you'll need to right-click > Open the first time.
+Since the app is not notarized, you'll need to right-click > Open the first time.
+
+If you're upgrading from a version that used sudo, the app will ask for your admin password once to remove the old `/etc/sudoers.d/battery` entry. The `/usr/local/bin/smc` tool is no longer needed and can be removed manually.
 
 ## Uninstall
 
@@ -49,11 +51,11 @@ Since the app is unsigned, you'll need to right-click > Open the first time.
 make uninstall
 ```
 
-This removes the app, the LaunchAgent, and the sudoers entry.
+This removes the app, the LaunchAgent, the helper daemon registration, and any legacy sudoers entry.
 
 ## How it works
 
-The app reads battery info through IOKit and controls charging by writing to SMC keys (`CHTE`, `CHIE`, `ACLC`) via the `smc` binary with passwordless sudo. Settings are stored in UserDefaults.
+The app reads battery info through IOKit. Charging is controlled by a small privileged helper daemon (registered via `SMAppService`, running on demand) that writes SMC keys (`CHTE`, `CHIE`, `ACLC`) directly through IOKit. The app talks to the helper over XPC; the helper only accepts connections from the signed app and only allows a fixed whitelist of SMC keys and values. No sudo involved. Settings are stored in UserDefaults.
 
 ## License
 
