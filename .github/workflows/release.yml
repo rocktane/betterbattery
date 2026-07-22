@@ -22,6 +22,15 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
+      - name: Create signing certificate
+        run: |
+          security create-keychain -p ci build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p ci build.keychain
+          security list-keychains -d user -s build.keychain
+          CERT_KEYCHAIN=build.keychain ./scripts/make-cert.sh "BetterBattery Signing"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci build.keychain >/dev/null
+
       - name: Build
         run: make build
 
@@ -58,8 +67,7 @@ jobs:
             3. Right-click → Open on first launch (unsigned app)
 
             ## Requirements
-            - **Apple Silicon Mac (M1+)** — macOS 12+
-            - [`smc`](https://github.com/beltex/SMCKit) binary at `/usr/local/bin/smc`
+            - **Apple Silicon Mac (M1+)** — macOS 13+
           files: build/BetterBattery.zip
           draft: false
           prerelease: false

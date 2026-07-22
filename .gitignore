@@ -53,8 +53,9 @@ Icon?
 *.mobileprovision
 *.provisionprofile
 
-# === Dev scripts ===
-scripts/
+# === Dev scripts (make-cert.sh is needed by CI and contributors) ===
+scripts/*
+!scripts/make-cert.sh
 
 # === Misc ===
 *.log
