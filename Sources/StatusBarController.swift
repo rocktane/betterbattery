@@ -904,7 +904,14 @@ class StatusBarController: NSObject, WidgetActionDelegate {
                 appRemoved = (try? fm.removeItem(atPath: appPath)) != nil
             }
             if hasLegacySudoers || !appRemoved {
-                let script = "do shell script \"rm -rf '\(appPath)' /etc/sudoers.d/battery /etc/sudoers.d/battery.bak\" with administrator privileges"
+                // The bundle path is interpolated into an admin shell command:
+                // escape it for the AppleScript string literal and let
+                // `quoted form of` handle shell metacharacters (a quote in the
+                // path must not become command injection running as admin).
+                let escapedPath = appPath
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                let script = "do shell script \"rm -rf \" & quoted form of \"\(escapedPath)\" & \" /etc/sudoers.d/battery /etc/sudoers.d/battery.bak\" with administrator privileges"
                 if let appleScript = NSAppleScript(source: script) {
                     var error: NSDictionary?
                     appleScript.executeAndReturnError(&error)
