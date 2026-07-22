@@ -44,12 +44,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // fail silently. Version mismatch, a daemon pinning another signing
         // identity (rejects us → no answer), or a registration launchd can no
         // longer spawn all land here: re-register to reload the daemon.
+        // A registration issued too soon after the unregister can itself yield
+        // a stale launch constraint ("spawn failed"), so verify the daemon
+        // actually answers and retry the whole cycle with a growing settle delay.
         if HelperManager.service.status == .enabled {
-            let daemonVersion = smcController.helperVersion()
-            if daemonVersion != kHelperVersion {
-                bbLog.info("Helper stale or unreachable (\(daemonVersion ?? "no answer")) — re-registering daemon")
+            var daemonVersion = smcController.helperVersion()
+            var attempt = 0
+            while daemonVersion != kHelperVersion && attempt < 3 {
+                attempt += 1
+                bbLog.info("Helper stale or unreachable (\(daemonVersion ?? "no answer"), attempt \(attempt)) — re-registering daemon")
                 HelperManager.reregister()
+                Thread.sleep(forTimeInterval: Double(attempt))
                 smcController.redetectCapabilities()
+                daemonVersion = smcController.helperVersion()
+            }
+            if daemonVersion != kHelperVersion {
+                bbLog.error("Helper still unreachable after \(attempt) re-registrations")
             }
         }
         batteryReader = BatteryReader()
@@ -159,6 +169,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func cleanupAndRestore() {
+        // A duplicate instance terminates from the instance-lock guard before
+        // init completes: nothing to clean up, and the force-unwraps below
+        // would trap — worse, touching SMC would undo the primary instance's
+        // charging state.
+        guard batteryReader != nil else { return }
         batteryReader.stop()
 
         // Stop an active drain so the Mac isn't left running off the battery while plugged in
