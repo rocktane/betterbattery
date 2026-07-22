@@ -36,32 +36,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         LegacyCleanup.runIfNeeded()
         HelperManager.ensureRegistered()
 
-        Notifier.setup()
-        smcController = SMCController()
-
+        // Daemon health check — BEFORE the first synchronous XPC call
+        // (SMCController.init probes capabilities; against a registration
+        // launchd cannot spawn, a sync call hangs the app pre-UI).
         // An already-approved daemon survives app upgrades (SMAppService stays
         // .enabled), so a stale binary would keep serving an old protocol and
         // fail silently. Version mismatch, a daemon pinning another signing
-        // identity (rejects us → no answer), or a registration launchd can no
-        // longer spawn all land here: re-register to reload the daemon.
-        // A registration issued too soon after the unregister can itself yield
-        // a stale launch constraint ("spawn failed"), so verify the daemon
-        // actually answers and retry the whole cycle with a growing settle delay.
-        if HelperManager.service.status == .enabled {
-            var daemonVersion = smcController.helperVersion()
-            var attempt = 0
-            while daemonVersion != kHelperVersion && attempt < 3 {
-                attempt += 1
-                bbLog.info("Helper stale or unreachable (\(daemonVersion ?? "no answer"), attempt \(attempt)) — re-registering daemon")
-                HelperManager.reregister()
-                Thread.sleep(forTimeInterval: Double(attempt))
-                smcController.redetectCapabilities()
-                daemonVersion = smcController.helperVersion()
-            }
-            if daemonVersion != kHelperVersion {
-                bbLog.error("Helper still unreachable after \(attempt) re-registrations")
+        // identity (rejects us → no answer), or an unspawnable registration
+        // all land here.
+        // Re-registering from this same process reliably records a stale
+        // launch constraint ("spawn failed", observed on macOS 15), while a
+        // registration made at fresh app startup works. So: drop the broken
+        // registration, then relaunch once — the next startup registers clean.
+        if HelperManager.service.status == .enabled,
+           SMCController.probeHelperVersion() != kHelperVersion {
+            if CommandLine.arguments.contains("--helper-reset") {
+                bbLog.error("Helper still unreachable after a clean re-registration")
+            } else {
+                bbLog.info("Helper stale or unreachable — resetting registration and relaunching")
+                HelperManager.unregister()
+                let relauncher = Process()
+                relauncher.executableURL = URL(fileURLWithPath: "/bin/sh")
+                relauncher.arguments = ["-c",
+                    "sleep 2; exec /usr/bin/open -n \"$0\" --args --helper-reset",
+                    Bundle.main.bundlePath]
+                try? relauncher.run()
+                exit(0)   // nothing initialized yet — skip cleanup entirely
             }
         }
+
+        Notifier.setup()
+        smcController = SMCController()
         batteryReader = BatteryReader()
         chargeLimiter = ChargeLimiter(smc: smcController)
         statusBarController = StatusBarController(

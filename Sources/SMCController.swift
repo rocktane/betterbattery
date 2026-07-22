@@ -43,11 +43,16 @@ class SMCController {
     // MARK: - Version
 
     /// Daemon protocol version, or nil if the daemon didn't answer within `timeout`.
-    /// Uses the async proxy: a daemon that launchd cannot spawn must not hang the
-    /// app at startup the way a synchronous call would.
-    func helperVersion(timeout: TimeInterval = 3) -> String? {
-        _ = proxy()  // ensure the connection exists
-        guard let c = connection else { return nil }
+    /// Standalone connection + async proxy so it is safe to call BEFORE any
+    /// synchronous XPC: a registration launchd cannot spawn ("spawn failed")
+    /// never replies and never invalidates, which hangs sync calls forever.
+    /// This is the startup health probe — it must not require an instance,
+    /// because SMCController.init itself performs XPC.
+    static func probeHelperVersion(timeout: TimeInterval = 3) -> String? {
+        let c = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
+        c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+        c.resume()
+        defer { c.invalidate() }
         let sem = DispatchSemaphore(value: 0)
         var version: String?
         let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
@@ -132,10 +137,19 @@ class SMCController {
         var tahoe = false
         var legacy = false
         var reached = false
-        proxy()?.probeCapabilities { t, l in
-            tahoe = t
-            legacy = l
-            reached = true
+        // Async + timeout: this runs at init, before the UI exists — an
+        // unspawnable daemon must degrade to "unavailable", not hang the app.
+        _ = proxy()  // ensure the connection exists
+        if let c = connection {
+            let sem = DispatchSemaphore(value: 0)
+            let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
+            p?.probeCapabilities { t, l in
+                tahoe = t
+                legacy = l
+                reached = true
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 5)
         }
         supportsTahoe = tahoe
         supportsLegacy = legacy
