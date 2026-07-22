@@ -5,18 +5,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-make build          # Compile → build/BetterBattery.app
-open build/BetterBattery.app  # Launch the app
-make install        # Copy to /Applications
+make cert           # One-time: create the self-signed code-signing certificate
+make build          # Compile → build/BetterBattery.app (app + privileged helper)
+make install        # Copy to /Applications (required for the daemon to register)
 make clean          # Remove build/
-make uninstall      # Remove app, LaunchAgent, and sudoers entry
+make uninstall      # Remove app, LaunchAgent, daemon registration, legacy sudoers
 ```
 
-Compilation uses `swiftc` directly with `-O -whole-module-optimization` and links Cocoa + IOKit frameworks. No Xcode project or Swift Package Manager — all sources are compiled in a single `swiftc` invocation.
+Compilation uses `swiftc` directly with `-O -whole-module-optimization` — two invocations, one for the app (Sources/ + Shared/), one for the privileged helper (Helper/ + Shared/). No Xcode project or Swift Package Manager. Both binaries are signed with a local self-signed certificate (`BetterBattery Signing`, created by `make cert`); the helper pins this certificate's SHA-1 (injected at build time into `build/CertHash.swift`) for XPC client validation.
 
 ## Architecture
 
-BetterBattery is a macOS menu bar utility (LSUIElement, no Dock icon) that monitors battery state and can limit charging via SMC to extend battery lifespan. Requires macOS 12+.
+BetterBattery is a macOS menu bar utility (LSUIElement, no Dock icon) that monitors battery state and can limit charging via SMC to extend battery lifespan. Requires macOS 13+.
+
+Privileged operations go through a **root helper daemon** (`com.betterbattery.helper`, registered via `SMAppService.daemon`, embedded at `Contents/Library/LaunchDaemons/`) that talks to AppleSMC directly via IOKit. No sudo, no sudoers, no external smc binary. The app talks to the daemon over XPC (`com.betterbattery.helper.xpc`); the daemon validates each connection via audit token + code-signing requirement (pinned cert + bundle id) and enforces a whitelist of SMC keys/values server-side.
 
 ### Component Flow
 
@@ -24,11 +26,16 @@ BetterBattery is a macOS menu bar utility (LSUIElement, no Dock icon) that monit
 AppDelegate (orchestrator)
   ├→ BatteryReader     — IOKit listener for power source changes, reads IOPowerSources + AppleSmartBattery
   ├→ ChargeLimiter     — hysteresis state machine (limit ±5% bands) that toggles charging via SMC
-  ├→ SMCController     — executes /usr/local/bin/smc binary with sudo; detects Tahoe (Apple Silicon) vs Legacy (Intel) keys
+  ├→ SMCController     — synchronous XPC facade over the helper daemon; same public API as before
   ├→ StatusBarController — NSStatusItem + NSMenu, rebuilds menu on every update
   │   └→ BatteryIconView — CoreGraphics custom NSView (battery shape + bolt/pause overlays)
   ├→ LaunchAtLogin      — writes/deletes ~/Library/LaunchAgents/com.betterbattery.plist
-  └→ Setup              — first-run check: verifies smc binary, installs /etc/sudoers.d/battery via AppleScript
+  └→ Setup              — HelperManager (SMAppService registration/approval) + LegacyCleanup (one-time removal of old sudoers/Keychain hash)
+
+Helper/ (root daemon, on-demand via launchd)
+  ├→ main.swift        — NSXPCListener + audit-token client validation (SecCodeCheckValidity)
+  ├→ HelperService     — HelperProtocol impl: whitelist, read-after-write verified SMC writes, pmset lowpowermode
+  └→ SMCKernel         — raw IOKit AppleSMC user client (80-byte SMCParamStruct, selectors read/write/keyinfo)
 ```
 
 ### Communication Pattern
@@ -42,6 +49,6 @@ Components communicate via **closures**, not delegates or NotificationCenter:
 
 - **BatteryState** is a struct that flows immutably from BatteryReader through the system
 - **ChargeLimiter** uses hysteresis (upper = limit+5%, lower = limit-5%) to prevent charge/discharge oscillation
-- **SMCController** detects hardware at init: Tahoe keys (`CHTE`, `CHIE`, `ACLC`) for Apple Silicon, legacy keys (`CH0B`, `CH0C`, `CH0I`) for Intel — all via an external `smc` CLI tool run with sudo
-- **Setup** uses `NSAppleScript` to run privileged commands (sudoers installation) with an admin prompt
+- **The helper daemon** detects hardware on first request: Tahoe keys (`CHTE`, `CHIE`, `ACLC`) for Apple Silicon, legacy keys (`CH0B`, `CH0C`, `CH0I`) for Intel — via IOKit directly
+- **LegacyCleanup** uses `NSAppleScript` once to remove the old `/etc/sudoers.d/battery` with an admin prompt
 - Settings persist via `UserDefaults` (charge limit %, display mode, setup completion flag)

@@ -1,6 +1,4 @@
 import Foundation
-import CryptoKit
-import Security
 import os.log
 
 enum MagSafeLEDColor: UInt8 {
@@ -10,306 +8,101 @@ enum MagSafeLEDColor: UInt8 {
     case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }
 
+/// XPC client facade over the privileged helper daemon.
+/// Keeps the same synchronous public API as the old sudo/smc implementation:
+/// every call blocks for the (ms-scale) round trip; if the daemon is not
+/// running or not approved, the error handler fires and methods return
+/// false/nil — fail-closed, identical to the old semantics.
 class SMCController {
-    private let smcPath = "/usr/local/bin/smc"
     private(set) var supportsTahoe: Bool = false
     private(set) var supportsLegacy: Bool = false
     private(set) var isAvailable: Bool = false
-    private(set) var needsSudoersReinstall: Bool = false
 
-    // SHA-256 integrity cache
-    private var cachedSmcHash: String? = nil
-    private var cachedSmcModDate: Date? = nil
-
-    private let keychainService = "com.betterbattery.smc-hash"
-    private let keychainAccount = "sha256"
+    private var connection: NSXPCConnection?
 
     init() {
         detectCapabilities()
     }
 
-    // MARK: - Keychain helpers
+    // MARK: - XPC plumbing
 
-    private func loadHashFromKeychain() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data,
-              let hash = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return hash
-    }
-
-    private func saveHashToKeychain(_ hash: String) {
-        guard let data = hash.data(using: .utf8) else { return }
-
-        // Try update first
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
-        ]
-        let update: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-
-        if updateStatus == errSecItemNotFound {
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            SecItemAdd(addQuery as CFDictionary, nil)
-        }
-    }
-
-    // MARK: - SMC Binary Integrity
-
-    private func validateSmcFileProperties() -> Bool {
-        let fm = FileManager.default
-
-        // Reject symlinks via lstat (attributesOfItem follows symlinks, so .typeSymbolicLink is never returned)
-        var stat = stat()
-        guard lstat(smcPath, &stat) == 0 else {
-            bbLog.warning("Cannot stat smc binary")
-            return false
-        }
-        if (stat.st_mode & S_IFMT) == S_IFLNK {
-            bbLog.error("smc binary is a symlink — refusing to execute")
-            return false
-        }
-        if (stat.st_mode & S_IFMT) != S_IFREG {
-            bbLog.error("smc binary is not a regular file")
-            return false
-        }
-
-        guard let attrs = try? fm.attributesOfItem(atPath: smcPath) else {
-            bbLog.warning("Cannot read attributes of smc binary")
-            return false
-        }
-
-        // Owner must be root (uid 0) or current user
-        if let ownerID = attrs[.ownerAccountID] as? NSNumber {
-            let uid = ownerID.uint32Value
-            if uid != 0 && uid != getuid() {
-                bbLog.error("smc binary owned by unexpected uid \(uid)")
-                return false
+    private func proxy() -> HelperProtocol? {
+        if connection == nil {
+            let c = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
+            c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+            c.invalidationHandler = { [weak self] in
+                DispatchQueue.main.async { self?.connection = nil }
             }
+            c.resume()
+            connection = c
         }
-
-        // No group/other write bits (mask 022)
-        if let perms = attrs[.posixPermissions] as? NSNumber {
-            let mode = perms.uint16Value
-            if mode & 0o022 != 0 {
-                bbLog.warning("smc binary has group/other write permissions (mode: \(String(mode, radix: 8)))")
-                return false
-            }
-        }
-
-        return true
-    }
-
-    func verifySMCBinary() -> Bool {
-        guard validateSmcFileProperties() else { return false }
-
-        let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: smcPath),
-              let modDate = attrs[.modificationDate] as? Date else {
-            bbLog.warning("Cannot read modification date of smc binary")
-            return false
-        }
-
-        // Cache hit: mod date unchanged since last check
-        if let cached = cachedSmcModDate, cached == modDate {
-            return cachedSmcHash != nil
-        }
-
-        // Compute hash
-        guard let fileData = fm.contents(atPath: smcPath) else {
-            bbLog.error("Cannot read smc binary for hashing")
-            return false
-        }
-        let digest = SHA256.hash(data: fileData)
-        let currentHash = digest.map { String(format: "%02x", $0) }.joined()
-
-        // Compare to stored hash
-        let storedHash = loadHashFromKeychain()
-        if storedHash == nil {
-            // First launch — trust the current binary
-            bbLog.info("No stored smc hash — trusting current binary and saving hash")
-            saveHashToKeychain(currentHash)
-            cachedSmcHash = currentHash
-            cachedSmcModDate = modDate
-            return true
-        }
-
-        if currentHash != storedHash {
-            bbLog.error("smc binary hash mismatch — binary may have been tampered with")
-            cachedSmcHash = nil
-            cachedSmcModDate = modDate
-            return false
-        }
-
-        // Hash matches
-        cachedSmcHash = currentHash
-        cachedSmcModDate = modDate
-        return true
-    }
-
-    /// Recalculate hash and store in Keychain. Only call after interactive user confirmation.
-    func trustCurrentSMCBinary() {
-        let fm = FileManager.default
-        guard let fileData = fm.contents(atPath: smcPath) else {
-            bbLog.error("Cannot read smc binary for re-trust")
-            return
-        }
-        let digest = SHA256.hash(data: fileData)
-        let newHash = digest.map { String(format: "%02x", $0) }.joined()
-        saveHashToKeychain(newHash)
-
-        if let attrs = try? fm.attributesOfItem(atPath: smcPath),
-           let modDate = attrs[.modificationDate] as? Date {
-            cachedSmcHash = newHash
-            cachedSmcModDate = modDate
-        }
-        bbLog.info("smc binary re-trusted with new hash")
+        return connection?.synchronousRemoteObjectProxyWithErrorHandler { error in
+            bbLog.warning("Helper XPC error: \(error.localizedDescription)")
+        } as? HelperProtocol
     }
 
     // MARK: - Key Operations
 
-    func readKey(_ key: String) -> String? {
-        let output = runSMC(args: ["-k", key, "-r"])
-        guard let output = output, !output.contains("no data") else { return nil }
-        return output
-    }
-
-    func writeKey(_ key: String, value: String) -> Bool {
-        guard runSMC(args: ["-k", key, "-w", value]) != nil else { return false }
-
-        // Read-after-write verification: the SMC may silently reject or clamp values.
-        guard let readBack = runSMC(args: ["-k", key, "-r"]) else {
-            bbLog.warning("SMC read-back failed for key \(key) — assuming write failed (fail-closed)")
-            return false
-        }
-
-        let writtenHex = value.lowercased().replacingOccurrences(of: " ", with: "")
-        guard let readHex = extractHexBytes(from: readBack) else {
-            bbLog.warning("Cannot parse SMC output for key \(key) — assuming write failed (fail-closed)")
-            return false
-        }
-
-        if readHex != writtenHex {
-            bbLog.error("SMC write verification failed for key \(key): wrote \(writtenHex), read back \(readHex)")
-            return false
-        }
-        return true
-    }
-
-    /// Extract hex byte values from smc read output.
-    /// Typical format: "  CHTE  [ui32]  (bytes 01 00 00 00)"
-    private func extractHexBytes(from output: String) -> String? {
-        guard let start = output.range(of: "(bytes ") else { return nil }
-        let afterBytes = output[start.upperBound...]
-        guard let end = afterBytes.firstIndex(of: ")") else { return nil }
-        return String(afterBytes[..<end])
-            .replacingOccurrences(of: " ", with: "")
-            .lowercased()
+    func readKey(_ key: String) -> Data? {
+        var result: Data?
+        proxy()?.readKey(key) { result = $0 }
+        return result
     }
 
     // MARK: - High-Level Charge Control
 
     func enableCharging() -> Bool {
-        if supportsTahoe {
-            return writeKey("CHTE", value: "00000000")
-        } else if supportsLegacy {
-            let a = writeKey("CH0B", value: "00")
-            let b = writeKey("CH0C", value: "00")
-            return a && b
-        }
-        return false
+        var ok = false
+        proxy()?.enableCharging { ok = $0 }
+        return ok
     }
 
     func disableCharging() -> Bool {
-        if supportsTahoe {
-            return writeKey("CHTE", value: "01000000")
-        } else if supportsLegacy {
-            let a = writeKey("CH0B", value: "02")
-            let b = writeKey("CH0C", value: "02")
-            return a && b
-        }
-        return false
+        var ok = false
+        proxy()?.disableCharging { ok = $0 }
+        return ok
     }
 
     /// Returns true when charging is enabled in SMC, false when explicitly disabled.
-    /// Returns nil if the current platform key is unreadable or has an unexpected value.
+    /// Returns nil if the helper is unreachable or the value is unexpected.
     func isChargingEnabledInSMC() -> Bool? {
-        if supportsTahoe {
-            guard let output = readKey("CHTE"),
-                  let hex = extractHexBytes(from: output) else {
-                return nil
-            }
-            switch hex {
-            case "00000000":
-                return true
-            case "01000000":
-                return false
-            default:
-                bbLog.warning("Unexpected CHTE value: \(hex)")
-                return nil
-            }
-        } else if supportsLegacy {
-            guard let outputB = readKey("CH0B"),
-                  let outputC = readKey("CH0C"),
-                  let hexB = extractHexBytes(from: outputB),
-                  let hexC = extractHexBytes(from: outputC) else {
-                return nil
-            }
-
-            if hexB == "00" && hexC == "00" {
-                return true
-            }
-            if hexB == "02" && hexC == "02" {
-                return false
-            }
-
-            bbLog.warning("Unexpected legacy charging values: CH0B=\(hexB), CH0C=\(hexC)")
-            return nil
+        var result: Bool?
+        proxy()?.isChargingEnabled { ok, enabled in
+            result = ok ? enabled : nil
         }
-        return nil
+        return result
     }
 
     func enableDischarge() -> Bool {
-        if supportsTahoe {
-            return writeKey("CHIE", value: "08")
-        } else if supportsLegacy {
-            return writeKey("CH0I", value: "01")
-        }
-        return false
+        var ok = false
+        proxy()?.enableDischarge { ok = $0 }
+        return ok
     }
 
     func disableDischarge() -> Bool {
-        if supportsTahoe {
-            return writeKey("CHIE", value: "00")
-        } else if supportsLegacy {
-            return writeKey("CH0I", value: "00")
-        }
-        return false
+        var ok = false
+        proxy()?.disableDischarge { ok = $0 }
+        return ok
     }
 
     @discardableResult
     func setMagSafeLED(_ color: MagSafeLEDColor) -> Bool {
-        // LED is cosmetic — use unverified write because macOS may override ACLC
-        // (e.g., .system writes 0x00 but macOS sets 0x04, failing read-after-write)
-        let value = String(format: "%02x", color.rawValue)
-        return runSMC(args: ["-k", "ACLC", "-w", value]) != nil
+        var ok = false
+        proxy()?.setMagSafeLED(color.rawValue) { ok = $0 }
+        return ok
+    }
+
+    // MARK: - Low Power Mode
+
+    func setLowPowerMode(_ enabled: Bool) -> Bool {
+        var ok = false
+        proxy()?.setLowPowerMode(enabled) { ok = $0 }
+        return ok
     }
 
     // MARK: - Capabilities Detection
 
-    /// Re-probe SMC capabilities (useful if smc binary was temporarily unavailable)
+    /// Re-probe SMC capabilities (e.g., after the daemon gets approved)
     func redetectCapabilities() {
         supportsTahoe = false
         supportsLegacy = false
@@ -318,75 +111,19 @@ class SMCController {
     }
 
     private func detectCapabilities() {
-        guard FileManager.default.fileExists(atPath: smcPath) else {
-            isAvailable = false
-            return
+        var tahoe = false
+        var legacy = false
+        var reached = false
+        proxy()?.probeCapabilities { t, l in
+            tahoe = t
+            legacy = l
+            reached = true
         }
-
-        guard verifySMCBinary() else {
-            bbLog.error("smc binary failed integrity check — marking unavailable")
-            isAvailable = false
-            return
-        }
-
-        isAvailable = true
-
-        // Try Tahoe keys (M1+)
-        if let result = readKey("CHTE"), !result.isEmpty {
-            supportsTahoe = true
-        }
-
-        // Try Legacy keys (Intel)
-        if !supportsTahoe {
-            if let result = readKey("CH0B"), !result.isEmpty {
-                supportsLegacy = true
-            }
-        }
-    }
-
-    // MARK: - Process Execution
-
-    private func runSMC(args: [String]) -> String? {
-        // Verify binary integrity before every execution (TOCTOU mitigation)
-        guard verifySMCBinary() else {
-            bbLog.error("smc binary integrity check failed — refusing to execute")
-            return nil
-        }
-
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        process.arguments = ["-n", smcPath] + args
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Check stderr for sudoers issues
-            if let stderrStr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !stderrStr.isEmpty {
-                bbLog.warning("smc stderr: \(stderrStr)")
-                if stderrStr.contains("a password is required") || stderrStr.contains("no tty present") {
-                    bbLog.error("Sudo requires password — sudoers may not be installed correctly")
-                    needsSudoersReinstall = true
-                }
-            }
-
-            if process.terminationStatus != 0 {
-                return nil
-            }
-            return output
-        } catch {
-            bbLog.error("Failed to launch smc process: \(error.localizedDescription)")
-            return nil
+        supportsTahoe = tahoe
+        supportsLegacy = legacy
+        isAvailable = reached && (tahoe || legacy)
+        if !reached {
+            bbLog.warning("Helper daemon unreachable — charge control unavailable")
         }
     }
 }
