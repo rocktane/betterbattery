@@ -13,7 +13,7 @@ CODESIGN_ID ?= BetterBattery Signing
 
 SWIFTC = swiftc
 SWIFT_FLAGS = -O -whole-module-optimization -target arm64-apple-macosx13.0
-FRAMEWORKS = -framework Cocoa -framework IOKit -framework ServiceManagement
+FRAMEWORKS = -framework Cocoa -framework IOKit -framework ServiceManagement -framework UserNotifications
 HELPER_FRAMEWORKS = -framework IOKit -framework Security
 
 .PHONY: all build cert install uninstall clean release init-github
@@ -65,7 +65,10 @@ uninstall:
 	@rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
 	@rm -f ~/Library/LaunchAgents/$(BUNDLE_ID).plist
 	@sudo rm -f /etc/sudoers.d/battery /etc/sudoers.d/battery.bak
-	@echo "Uninstalled."
+	@security delete-generic-password -s com.betterbattery.smc-hash >/dev/null 2>&1 || true
+	@rm -rf ~/Library/Application\ Support/BetterBattery
+	@defaults delete $(BUNDLE_ID) >/dev/null 2>&1 || true
+	@echo "Uninstalled (app, daemon, LaunchAgent, sudoers, Keychain item, history, preferences)."
 
 clean:
 	@rm -rf $(BUILD_DIR)

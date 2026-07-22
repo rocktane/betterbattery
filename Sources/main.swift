@@ -36,6 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         LegacyCleanup.runIfNeeded()
         HelperManager.ensureRegistered()
 
+        Notifier.setup()
         smcController = SMCController()
         batteryReader = BatteryReader()
         chargeLimiter = ChargeLimiter(smc: smcController)
@@ -104,6 +105,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        statusBarController?.saveHistory()
         cleanupAndRestore()
     }
 
@@ -144,6 +146,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func cleanupAndRestore() {
         batteryReader.stop()
+
+        // Stop an active drain so the Mac isn't left running off the battery while plugged in
+        statusBarController?.stopDischarge(notify: false)
 
         // Remember whether the limit was active before stopping
         let wasActive = chargeLimiter.isActive

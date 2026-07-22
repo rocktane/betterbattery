@@ -1,15 +1,30 @@
 import Cocoa
 
-/// Stores timestamped battery percentage readings, pruning entries older than 24h.
+/// Stores timestamped battery percentage readings, pruning entries older than 7 days.
 class BatteryHistory {
-    struct Entry {
+    struct Entry: Codable {
         let date: Date
         let percentage: Int
         let isCharging: Bool
     }
 
     private(set) var entries: [Entry] = []
-    private let maxAge: TimeInterval = 24 * 3600  // 24h
+    private let maxAge: TimeInterval = 7 * 24 * 3600  // 7 days
+    private var lastSave = Date.distantPast
+    private let saveInterval: TimeInterval = 60
+
+    /// ~/Library/Application Support/BetterBattery/history.json
+    private static var fileURL: URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("BetterBattery", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("history.json")
+    }
+
+    init() {
+        load()
+    }
 
     func record(percentage: Int, isCharging: Bool) {
         let now = Date()
@@ -21,190 +36,166 @@ class BatteryHistory {
         }
         entries.append(Entry(date: now, percentage: percentage, isCharging: isCharging))
         prune()
+        // Throttled save: at most once a minute, enough for the graph's granularity.
+        if now.timeIntervalSince(lastSave) >= saveInterval {
+            save()
+            lastSave = now
+        }
     }
+
+    func saveNow() { save() }
 
     private func prune() {
         let cutoff = Date().addingTimeInterval(-maxAge)
         entries.removeAll { $0.date < cutoff }
     }
+
+    private func load() {
+        guard let url = Self.fileURL,
+              let data = try? Data(contentsOf: url),
+              let saved = try? JSONDecoder().decode([Entry].self, from: data)
+        else { return }
+        entries = saved
+        prune()
+    }
+
+    private func save() {
+        guard let url = Self.fileURL,
+              let data = try? JSONEncoder().encode(entries)
+        else { return }
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
-/// CoreGraphics-based graph view for the menu, showing battery % over the last 24h.
+/// Apple Settings-style battery histogram: one green bar per hour over the last 7 days,
+/// with day labels on the axis and 0/50/100% gridlines on the right.
 class BatteryGraphView: NSView {
     var history: BatteryHistory?
 
-    private let graphInsetLeft: CGFloat = 8
-    private let graphInsetRight: CGFloat = 42  // space for right-side labels
-    private let graphInsetTop: CGFloat = 8
-    private let graphInsetBottom: CGFloat = 18  // space for time labels
+    private let insetLeft: CGFloat = 12
+    private let insetRight: CGFloat = 40   // space for % labels
+    private let insetTop: CGFloat = 14
+    private let insetBottom: CGFloat = 24  // space for day labels
+
+    private let windowSeconds: TimeInterval = 7 * 24 * 3600
+    private let bucketSeconds: TimeInterval = 3600   // one bar per hour
+    private static let barGreen = NSColor(srgbRed: 52/255.0, green: 211/255.0, blue: 153/255.0, alpha: 1)
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let entries = history?.entries ?? []
 
-        let graphRect = NSRect(
-            x: graphInsetLeft,
-            y: graphInsetBottom,
-            width: bounds.width - graphInsetLeft - graphInsetRight,
-            height: bounds.height - graphInsetTop - graphInsetBottom
+        let rect = NSRect(
+            x: insetLeft,
+            y: insetBottom,
+            width: bounds.width - insetLeft - insetRight,
+            height: bounds.height - insetTop - insetBottom
         )
 
-        drawGridLines(ctx: ctx, rect: graphRect)
-        drawTimeline(ctx: ctx, rect: graphRect)
+        drawGrid(ctx: ctx, rect: rect)
+        drawDayLabels(ctx: ctx, rect: rect)
 
         if entries.count >= 2 {
-            drawLine(ctx: ctx, rect: graphRect, entries: entries)
-            drawRightLabels(ctx: ctx, rect: graphRect, entries: entries)
+            drawBars(ctx: ctx, rect: rect, entries: entries)
         } else {
-            drawPlaceholder(rect: graphRect)
+            drawPlaceholder(rect: rect)
         }
     }
 
-    // MARK: - Grid (horizontal lines every 10%)
+    // MARK: - Grid (0 / 20 / 40 / 60 / 80 / 100%)
 
-    private func drawGridLines(ctx: CGContext, rect: NSRect) {
-        let lineColor = NSColor.labelColor.withAlphaComponent(0.08)
-        let textColor = NSColor.secondaryLabelColor
+    private func drawGrid(ctx: CGContext, rect: NSRect) {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
 
-        for step in 0...10 {
-            let pct = step * 10
+        for pct in stride(from: 0, through: 100, by: 20) {
             let y = rect.minY + rect.height * CGFloat(pct) / 100.0
-
-            // Horizontal line
-            ctx.setStrokeColor(lineColor.cgColor)
+            ctx.setStrokeColor(NSColor.labelColor.withAlphaComponent(pct == 0 ? 0.20 : 0.08).cgColor)
             ctx.setLineWidth(0.5)
             ctx.move(to: CGPoint(x: rect.minX, y: y))
             ctx.addLine(to: CGPoint(x: rect.maxX, y: y))
             ctx.strokePath()
 
-            // Left label every 20%
-            if pct % 20 == 0 {
-                let str = "\(pct)" as NSString
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: textColor
-                ]
+            if pct % 50 == 0 {
+                let str = "\(pct)%" as NSString
                 let size = str.size(withAttributes: attrs)
-                str.draw(at: NSPoint(x: rect.maxX + 4, y: y - size.height / 2), withAttributes: attrs)
+                str.draw(at: NSPoint(x: rect.maxX + 6, y: y - size.height / 2), withAttributes: attrs)
             }
         }
     }
 
-    // MARK: - Timeline (bottom axis)
+    // MARK: - Day labels (one per midnight)
 
-    private func drawTimeline(ctx: CGContext, rect: NSRect) {
-        let textColor = NSColor.secondaryLabelColor
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+    private func drawDayLabels(ctx: CGContext, rect: NSRect) {
+        let font = NSFont.systemFont(ofSize: 9, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: textColor
+            .foregroundColor: NSColor.secondaryLabelColor
         ]
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE"
 
-        // Show markers: 24h, 18h, 12h, 6h, now
-        let markers: [(hours: Int, label: String)] = [
-            (24, "24h"), (18, "18h"), (12, "12h"), (6, "6h"), (0, "now")
-        ]
+        let now = Date()
+        let cal = Calendar.current
+        var midnight = cal.startOfDay(for: now)
 
-        for marker in markers {
-            let x = rect.minX + rect.width * CGFloat(24 - marker.hours) / 24.0
-            let str = marker.label as NSString
-            let size = str.size(withAttributes: attrs)
+        while now.timeIntervalSince(midnight) <= windowSeconds {
+            let age = now.timeIntervalSince(midnight)
+            let x = rect.minX + rect.width * CGFloat(1.0 - age / windowSeconds)
 
-            // Tick mark
+            // Tick
             ctx.setStrokeColor(NSColor.labelColor.withAlphaComponent(0.15).cgColor)
             ctx.setLineWidth(0.5)
             ctx.move(to: CGPoint(x: x, y: rect.minY))
-            ctx.addLine(to: CGPoint(x: x, y: rect.minY - 3))
+            ctx.addLine(to: CGPoint(x: x, y: rect.minY - 4))
             ctx.strokePath()
 
-            // Label
-            let labelX = min(max(rect.minX, x - size.width / 2), rect.maxX - size.width)
-            str.draw(at: NSPoint(x: labelX, y: rect.minY - 3 - size.height), withAttributes: attrs)
+            let str = formatter.string(from: midnight) as NSString
+            let size = str.size(withAttributes: attrs)
+            let labelX = min(max(rect.minX, x + 3), rect.maxX - size.width)
+            str.draw(at: NSPoint(x: labelX, y: rect.minY - 5 - size.height), withAttributes: attrs)
+
+            guard let prev = cal.date(byAdding: .day, value: -1, to: midnight) else { break }
+            midnight = prev
         }
     }
 
-    // MARK: - Battery line
+    // MARK: - Bars (hourly average, rounded tops)
 
-    private func drawLine(ctx: CGContext, rect: NSRect, entries: [BatteryHistory.Entry]) {
+    private func drawBars(ctx: CGContext, rect: NSRect, entries: [BatteryHistory.Entry]) {
         let now = Date()
-        let window: TimeInterval = 24 * 3600
+        let bucketCount = Int(windowSeconds / bucketSeconds)
 
-        let path = NSBezierPath()
-        var started = false
-
-        for entry in entries {
-            let age = now.timeIntervalSince(entry.date)
-            guard age <= window else { continue }
-            let x = rect.minX + rect.width * CGFloat(1.0 - age / window)
-            let y = rect.minY + rect.height * CGFloat(entry.percentage) / 100.0
-
-            if !started {
-                path.move(to: CGPoint(x: x, y: y))
-                started = true
-            } else {
-                path.line(to: CGPoint(x: x, y: y))
-            }
+        // Average percentage per hourly bucket (0 = oldest, last = current hour)
+        var sums = [Int](repeating: 0, count: bucketCount)
+        var counts = [Int](repeating: 0, count: bucketCount)
+        for e in entries {
+            let age = now.timeIntervalSince(e.date)
+            guard age >= 0, age < windowSeconds else { continue }
+            let idx = bucketCount - 1 - Int(age / bucketSeconds)
+            guard idx >= 0, idx < bucketCount else { continue }
+            sums[idx] += e.percentage
+            counts[idx] += 1
         }
 
-        guard started else { return }
+        let slot = rect.width / CGFloat(bucketCount)
+        let barWidth = max(1, slot * 0.72)   // small gap between bars, Apple-style
 
-        // Line stroke
         ctx.saveGState()
-        NSColor.controlAccentColor.withAlphaComponent(0.9).setStroke()
-        path.lineWidth = 1.5
-        path.lineJoinStyle = .round
-        path.lineCapStyle = .round
-        path.stroke()
-        ctx.restoreGState()
-
-        // Fill under the line
-        if let lastEntry = entries.last {
-            let lastAge = now.timeIntervalSince(lastEntry.date)
-            let lastX = rect.minX + rect.width * CGFloat(1.0 - lastAge / window)
-            let firstAge = now.timeIntervalSince(entries.first(where: { now.timeIntervalSince($0.date) <= window })!.date)
-            let firstX = rect.minX + rect.width * CGFloat(1.0 - firstAge / window)
-
-            let fillPath = path.copy() as! NSBezierPath
-            fillPath.line(to: CGPoint(x: lastX, y: rect.minY))
-            fillPath.line(to: CGPoint(x: firstX, y: rect.minY))
-            fillPath.close()
-
-            ctx.saveGState()
-            NSColor.controlAccentColor.withAlphaComponent(0.08).setFill()
-            fillPath.fill()
-            ctx.restoreGState()
+        Self.barGreen.setFill()
+        for i in 0..<bucketCount {
+            guard counts[i] > 0 else { continue }
+            let pct = CGFloat(sums[i]) / CGFloat(counts[i])
+            let h = max(2, rect.height * pct / 100.0)
+            let x = rect.minX + CGFloat(i) * slot + (slot - barWidth) / 2
+            let bar = NSRect(x: x, y: rect.minY, width: barWidth, height: h)
+            let radius = min(barWidth / 2, 2)
+            NSBezierPath(roundedRect: bar, xRadius: radius, yRadius: radius).fill()
         }
-    }
-
-    // MARK: - Right-side value labels
-
-    private func drawRightLabels(ctx: CGContext, rect: NSRect, entries: [BatteryHistory.Entry]) {
-        guard let last = entries.last else { return }
-
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.labelColor
-        ]
-
-        let str = "\(last.percentage)%" as NSString
-        let size = str.size(withAttributes: attrs)
-        let y = rect.minY + rect.height * CGFloat(last.percentage) / 100.0
-
-        // Clamp Y to stay within graph bounds
-        let clampedY = min(max(rect.minY, y - size.height / 2), rect.maxY - size.height)
-
-        str.draw(at: NSPoint(x: rect.maxX + 4, y: clampedY), withAttributes: attrs)
-
-        // Small dot at the current value on the line
-        let now = Date()
-        let age = now.timeIntervalSince(last.date)
-        let dotX = rect.minX + rect.width * CGFloat(1.0 - age / (24 * 3600))
-        let dotY = rect.minY + rect.height * CGFloat(last.percentage) / 100.0
-        let dotRect = NSRect(x: dotX - 2.5, y: dotY - 2.5, width: 5, height: 5)
-        NSColor.controlAccentColor.setFill()
-        NSBezierPath(ovalIn: dotRect).fill()
+        ctx.restoreGState()
     }
 
     // MARK: - Placeholder

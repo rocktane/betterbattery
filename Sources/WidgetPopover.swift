@@ -45,6 +45,7 @@ struct WidgetModel: Equatable {
     var drawWatts = 0          // actual power drawn by the computer
     var powerSource = ""
     var caffeineActive = false
+    var dischargeActive = false
 }
 
 // MARK: - Actions the widget triggers, handled by StatusBarController
@@ -52,6 +53,7 @@ struct WidgetModel: Equatable {
 protocol WidgetActionDelegate: AnyObject {
     func widgetToggleLimit()
     func widgetToggleTopUp()
+    func widgetToggleDischarge()
     func widgetSetLimit(_ value: Int)
     func widgetSetAmplitude(_ value: Int)
     func widgetSetDisplayMode(_ mode: MenuBarDisplayMode)
@@ -61,6 +63,7 @@ protocol WidgetActionDelegate: AnyObject {
     func widgetToggleStopChargingBeforeSleep()
     func widgetToggleLaunchAtLogin()
     func widgetSetTheme(_ mode: Int)
+    func widgetShowHistory()
     func widgetShowAbout()
     func widgetUninstall()
     func widgetQuit()
@@ -340,11 +343,11 @@ final class DockButton: NSView {
         if isActiveState {
             layer?.backgroundColor = NSColor.bbGreen.withAlphaComponent(0.16).cgColor
             layer?.borderColor = NSColor.bbGreen.withAlphaComponent(0.55).cgColor
-            layer?.borderWidth = 1
+            layer?.borderWidth = 2
         } else {
             layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
             layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
-            layer?.borderWidth = 0.5
+            layer?.borderWidth = 2
         }
     }
 
@@ -463,9 +466,10 @@ final class WidgetViewController: NSViewController {
     // Dock
     private let limitBtn = DockButton(symbol: "bolt.fill", title: "Limit")
     private let topUpBtn = DockButton(symbol: "arrow.up.to.line", title: "Top-Up")
+    private let dischargeBtn = DockButton(symbol: "arrow.down.to.line", title: "Drain")
     private let caffeineBtn = DockButton(symbol: "cup.and.saucer.fill", title: "Awake")
     private let lpmBtn = DockButton(symbol: "leaf.fill", title: "LPM")
-    private let settingsBtn = DockButton(symbol: "gearshape.fill", title: "Settings")
+    private let settingsGear = NSButton()
     // Settings controls
     private let limitSeg = SegmentedPicker(labels: ["60", "70", "80", "90", "100"])
     private let ampSeg = SegmentedPicker(labels: ["±2", "±5", "±8", "±10"])
@@ -586,13 +590,26 @@ final class WidgetViewController: NSViewController {
         etaLabel.textColor = .secondaryLabelColor
         etaLabel.alignment = .left
         etaLabel.lineBreakMode = .byTruncatingTail
-        etaLabel.frame = NSRect(x: P, y: 84, width: innerW, height: 14)
+        etaLabel.frame = NSRect(x: P, y: 84, width: innerW - 26, height: 14)
         view.addSubview(etaLabel)
+
+        // Small gear on the eta line, flush right — toggles the settings panel.
+        settingsGear.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "Settings")
+        settingsGear.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        settingsGear.isBordered = false
+        settingsGear.focusRingType = .none
+        settingsGear.refusesFirstResponder = true
+        settingsGear.contentTintColor = .secondaryLabelColor
+        settingsGear.target = self
+        settingsGear.action = #selector(settingsGearTapped)
+        settingsGear.toolTip = "Open settings"
+        settingsGear.frame = NSRect(x: Self.width - P - 18, y: 82, width: 18, height: 18)
+        view.addSubview(settingsGear)
 
         // Dock (static, directly under the bar — buttons sit above the info cards).
         // Span the full content width so the row's left/right edges line up with the
-        // info cards below (5 equal buttons separated by equal gaps).
-        dockButtons = [limitBtn, topUpBtn, caffeineBtn, lpmBtn, settingsBtn]
+        // info cards below (equal buttons separated by equal gaps).
+        dockButtons = [limitBtn, topUpBtn, dischargeBtn, caffeineBtn, lpmBtn]
         let btnW = (innerW - CGFloat(dockButtons.count - 1) * gridGap) / CGFloat(dockButtons.count)
         let step = btnW + gridGap
         for (i, btn) in dockButtons.enumerated() {
@@ -601,9 +618,14 @@ final class WidgetViewController: NSViewController {
         }
         limitBtn.onClick = { [weak self] in self?.delegate?.widgetToggleLimit() }
         topUpBtn.onClick = { [weak self] in self?.delegate?.widgetToggleTopUp() }
+        dischargeBtn.onClick = { [weak self] in self?.delegate?.widgetToggleDischarge() }
         caffeineBtn.onClick = { [weak self] in self?.delegate?.widgetToggleCaffeine() }
         lpmBtn.onClick = { [weak self] in self?.delegate?.widgetToggleLowPowerMode() }
-        settingsBtn.onClick = { [weak self] in self?.toggleSettings() }
+        limitBtn.toolTip = "Hold the charge at the configured limit to preserve battery health"
+        topUpBtn.toolTip = "Temporarily charge to 100%, then return to the limit"
+        dischargeBtn.toolTip = "Actively discharge the battery down to the charge limit while plugged in"
+        caffeineBtn.toolTip = "Keep the Mac awake (prevent sleep)"
+        lpmBtn.toolTip = "Toggle macOS Low Power Mode"
 
         // Charging info cards (usage · charger) in a clipping container: shown on the
         // adapter, collapsed (with animation) on battery. Positioned by relayout().
@@ -620,11 +642,10 @@ final class WidgetViewController: NSViewController {
         detailsContainer.wantsLayer = true
         detailsContainer.layer?.masksToBounds = true
         detailsContainer.frame = NSRect(x: 0, y: Self.detailsBaseY, width: Self.width, height: 0)
-        let dx = cardFrames(4, atY: 0)
+        let dx = cardFrames(3, atY: 0)
         makeCard("HEALTH", healthValue, into: detailsContainer, frame: dx[0])
         makeCard("CYCLES", cyclesValue, into: detailsContainer, frame: dx[1])
-        makeCard("TEMP", tempValue, into: detailsContainer, frame: dx[2])
-        makeCard("UPTIME", uptimeValue, into: detailsContainer, frame: dx[3])
+        makeCard("UPTIME", uptimeValue, into: detailsContainer, frame: dx[2])
         uptimeValue.font = .systemFont(ofSize: 14, weight: .semibold)
         view.addSubview(detailsContainer)
 
@@ -677,7 +698,7 @@ final class WidgetViewController: NSViewController {
         let afterChevron = chevronY + 22 + 6
         let settingsFrame = NSRect(x: 0, y: afterChevron, width: Self.width, height: settingsH)
         // Keep the chevron close to the window's bottom edge when settings are closed.
-        let totalH = settingsOpen ? (afterChevron + settingsH + 8) : (chevronY + 22 + 4)
+        let totalH = settingsOpen ? (afterChevron + settingsH) : (chevronY + 22 + 4)
 
         settingsContainer.frame = settingsFrame
 
@@ -754,12 +775,12 @@ final class WidgetViewController: NSViewController {
             let l = NSTextField(labelWithString: title)
             l.font = .systemFont(ofSize: 13)
             l.textColor = .labelColor
-            l.frame = NSRect(x: P, y: cy + 4, width: 200, height: 18)
+            l.frame = NSRect(x: P, y: cy + 2, width: 200, height: 18)
             c.addSubview(l)
             sw.onToggle = onToggle
-            sw.frame = NSRect(x: Self.width - P - 46, y: cy, width: 46, height: 28)
+            sw.frame = NSRect(x: Self.width - P - 40, y: cy, width: 40, height: 22)
             c.addSubview(sw)
-            cy += 28 + 14
+            cy += 22 + 14
         }
 
         addSwitchRow("Stop charging on sleep", sleepSwitch) { [weak self] _ in
@@ -772,21 +793,24 @@ final class WidgetViewController: NSViewController {
 
         // footer buttons — flat rounded, sharing the full width equally
         let footer: [(String, Selector)] = [
+            ("History", #selector(historyTapped)),
             ("About", #selector(aboutTapped)),
             ("Uninstall", #selector(uninstallTapped)),
             ("Quit", #selector(quitTapped))
         ]
         let gap: CGFloat = 8
-        let bw = (innerW - 2 * gap) / 3
+        let bw = (innerW - CGFloat(footer.count - 1) * gap) / CGFloat(footer.count)
         let bh: CGFloat = 34
         for (i, (title, sel)) in footer.enumerated() {
             let b = NSButton(title: "", target: self, action: sel)
             b.isBordered = false
+            b.focusRingType = .none
+            b.refusesFirstResponder = true
             b.wantsLayer = true
             b.layer?.cornerRadius = kCornerRadius
             b.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
             b.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
-            b.layer?.borderWidth = 0.5
+            b.layer?.borderWidth = 2
             let para = NSMutableParagraphStyle(); para.alignment = .center
             b.attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: NSColor.labelColor,
@@ -803,16 +827,18 @@ final class WidgetViewController: NSViewController {
 
     // MARK: Settings toggle (grow / shrink popover)
 
+    @objc private func settingsGearTapped() { toggleSettings() }
+
     private func toggleSettings() {
         settingsOpen.toggle()
-        settingsBtn.isActiveState = settingsOpen
+        settingsGear.contentTintColor = settingsOpen ? .labelColor : .secondaryLabelColor
         relayout(animated: true)
     }
 
     /// Called by StatusBarController when the popover closes.
     func resetSettings() {
         settingsOpen = false
-        settingsBtn.isActiveState = false
+        settingsGear.contentTintColor = .secondaryLabelColor
         relayout()
     }
 
@@ -927,6 +953,21 @@ final class WidgetViewController: NSViewController {
         limitBtn.isActiveState = m.limitActive
         topUpBtn.isActiveState = m.topUpActive
         topUpBtn.isEnabledState = m.limitActive
+        dischargeBtn.isActiveState = m.dischargeActive
+        // Draining works with or without the limiter — it just needs the adapter and
+        // a percentage above the configured limit (the drain target).
+        dischargeBtn.isEnabledState = m.dischargeActive
+            || (m.isPluggedIn && m.percentage > m.limitPercentage)
+        // Tooltip explains why the button is greyed out when it is.
+        if m.dischargeActive {
+            dischargeBtn.toolTip = "Stop draining and reconnect the adapter"
+        } else if !m.isPluggedIn {
+            dischargeBtn.toolTip = "Plug in the charger to drain — on battery it already discharges naturally"
+        } else if m.percentage <= m.limitPercentage {
+            dischargeBtn.toolTip = "Battery already at or below the \(m.limitPercentage)% limit — nothing to drain"
+        } else {
+            dischargeBtn.toolTip = "Actively discharge the battery down to \(m.limitPercentage)% while plugged in"
+        }
         caffeineBtn.isActiveState = m.caffeineActive
         lpmBtn.isActiveState = m.lowPowerModeOn
 
@@ -942,6 +983,7 @@ final class WidgetViewController: NSViewController {
 
     // MARK: Control actions
 
+    @objc private func historyTapped() { delegate?.widgetShowHistory() }
     @objc private func aboutTapped() { delegate?.widgetShowAbout() }
     @objc private func uninstallTapped() { delegate?.widgetUninstall() }
     @objc private func quitTapped() { delegate?.widgetQuit() }

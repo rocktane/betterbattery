@@ -71,6 +71,7 @@ enum LegacyCleanup {
         deleteKeychainHash()
         defaults.removeObject(forKey: "hasCompletedSetup")
         defaults.removeObject(forKey: "sudoersV5")
+        defaults.removeObject(forKey: "sudoersV6")
         defaults.removeObject(forKey: "sudoersInstalledUser")
 
         if sudoersRemoved {

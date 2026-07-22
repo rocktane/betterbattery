@@ -251,6 +251,9 @@ class ChargeLimiter {
                 thermalHold = true
                 smc.setMagSafeLED(.orangeFastBlink)
                 bbLog.info("Thermal hold — charging stopped at \(temperature, format: .fixed(precision: 1))°C")
+                Notifier.send("Thermal protection",
+                              String(format: "Battery at %.1f°C — charging paused until it cools down.", temperature),
+                              id: "thermal")
             }
             onStateChange?()
             return
@@ -267,6 +270,9 @@ class ChargeLimiter {
                 onStateChange?()
             }
             bbLog.info("Thermal hold cleared at \(temperature, format: .fixed(precision: 1))°C")
+            Notifier.send("Thermal protection cleared",
+                          String(format: "Battery cooled down to %.1f°C — normal charge control resumed.", temperature),
+                          id: "thermal")
         }
 
         if thermalHold { return }
@@ -275,6 +281,9 @@ class ChargeLimiter {
         if percentage >= upperBound && chargingEnabled {
             if smc.disableCharging() {
                 chargingEnabled = false
+                Notifier.send("Charge limit reached",
+                              "Battery held at \(limitPercentage)% — charging paused.",
+                              id: "limit-reached")
             } else {
                 bbLog.warning("Failed to disable charging at \(percentage)%%")
             }
@@ -293,9 +302,15 @@ class ChargeLimiter {
         syncMagSafeLED(percentage: percentage)
     }
 
+    /// When set, the LED is forced to this color (e.g. .off during an active discharge)
+    /// instead of following the limiter state. Cleared by StatusBarController.
+    var ledOverride: MagSafeLEDColor? = nil
+
     private func syncMagSafeLED(percentage: Int) {
         let desired: MagSafeLEDColor
-        if thermalHold {
+        if let override = ledOverride {
+            desired = override
+        } else if thermalHold {
             desired = .orangeFastBlink
         } else if !chargingEnabled {
             desired = .green

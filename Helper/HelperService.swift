@@ -159,8 +159,8 @@ final class HelperService: NSObject, HelperProtocol {
     }
 
     func setMagSafeLED(_ raw: UInt8, reply: @escaping (Bool) -> Void) {
-        // Whitelist: system (0x00), green (0x03), orange fast blink (0x07)
-        guard [0x00, 0x03, 0x07].contains(raw) else {
+        // Whitelist: system (0x00), off (0x01), green (0x03), orange fast blink (0x07)
+        guard [0x00, 0x01, 0x03, 0x07].contains(raw) else {
             helperLog.error("Rejected ACLC value \(raw)")
             reply(false)
             return
