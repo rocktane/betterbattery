@@ -50,6 +50,33 @@ enum HelperManager {
             bbLog.error("Helper unregistration failed: \(error.localizedDescription)")
         }
     }
+
+    /// Unregister then register again, reloading the daemon binary.
+    /// BTM completes the removal asynchronously: right after unregister() the
+    /// status can still read .enabled, where register() is a silent no-op. Wait
+    /// for the removal to land, then register (retrying while the system settles).
+    static func reregister() {
+        unregister()
+        var registered = false
+        for _ in 0..<10 {
+            if service.status != .enabled {
+                do {
+                    try service.register()
+                    bbLog.info("Helper daemon re-registered")
+                    registered = true
+                    break
+                } catch {
+                    bbLog.info("Helper re-register attempt failed: \(error.localizedDescription)")
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if service.status == .requiresApproval {
+            promptForApproval()
+        } else if !registered {
+            bbLog.error("Helper re-registration failed (status \(service.status.rawValue))")
+        }
+    }
 }
 
 /// One-time cleanup of the pre-daemon architecture (external smc binary +

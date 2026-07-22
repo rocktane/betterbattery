@@ -3,7 +3,6 @@ import os.log
 
 enum MagSafeLEDColor: UInt8 {
     case system = 0x00          // Contrôle par macOS (défaut)
-    case off = 0x01             // Éteinte (décharge active en cours)
     case green = 0x03           // Vert fixe (limite atteinte)
     case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }
@@ -39,6 +38,30 @@ class SMCController {
         return connection?.synchronousRemoteObjectProxyWithErrorHandler { error in
             bbLog.warning("Helper XPC error: \(error.localizedDescription)")
         } as? HelperProtocol
+    }
+
+    // MARK: - Version
+
+    /// Daemon protocol version, or nil if the daemon didn't answer within `timeout`.
+    /// Standalone connection + async proxy so it is safe to call BEFORE any
+    /// synchronous XPC: a registration launchd cannot spawn ("spawn failed")
+    /// never replies and never invalidates, which hangs sync calls forever.
+    /// This is the startup health probe — it must not require an instance,
+    /// because SMCController.init itself performs XPC.
+    static func probeHelperVersion(timeout: TimeInterval = 3) -> String? {
+        let c = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
+        c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+        c.resume()
+        defer { c.invalidate() }
+        let sem = DispatchSemaphore(value: 0)
+        var version: String?
+        let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
+        p?.getVersion { v in
+            version = v
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout)
+        return version
     }
 
     // MARK: - Key Operations
@@ -114,10 +137,19 @@ class SMCController {
         var tahoe = false
         var legacy = false
         var reached = false
-        proxy()?.probeCapabilities { t, l in
-            tahoe = t
-            legacy = l
-            reached = true
+        // Async + timeout: this runs at init, before the UI exists — an
+        // unspawnable daemon must degrade to "unavailable", not hang the app.
+        _ = proxy()  // ensure the connection exists
+        if let c = connection {
+            let sem = DispatchSemaphore(value: 0)
+            let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
+            p?.probeCapabilities { t, l in
+                tahoe = t
+                legacy = l
+                reached = true
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 5)
         }
         supportsTahoe = tahoe
         supportsLegacy = legacy

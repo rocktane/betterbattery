@@ -4,8 +4,9 @@ import Foundation
 let kHelperMachService = "com.betterbattery.helper.xpc"
 
 /// Helper version, bumped when the protocol or helper behavior changes.
-/// The app compares it to its own to detect a stale approved daemon.
-let kHelperVersion = "1"
+/// The app compares it to its own at startup and re-registers on mismatch.
+/// 2: ACLC whitelist drops 0x01 (off); setLowPowerMode targets battery profile only.
+let kHelperVersion = "2"
 
 /// XPC protocol between the app and the privileged helper daemon.
 /// The daemon owns platform detection (Tahoe vs legacy keys) and enforces a

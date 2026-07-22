@@ -36,6 +36,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         LegacyCleanup.runIfNeeded()
         HelperManager.ensureRegistered()
 
+        // Daemon health check — BEFORE the first synchronous XPC call
+        // (SMCController.init probes capabilities; against a registration
+        // launchd cannot spawn, a sync call hangs the app pre-UI).
+        // An already-approved daemon survives app upgrades (SMAppService stays
+        // .enabled), so a stale binary would keep serving an old protocol and
+        // fail silently. Version mismatch, a daemon pinning another signing
+        // identity (rejects us → no answer), or an unspawnable registration
+        // all land here.
+        // Re-registering from this same process reliably records a stale
+        // launch constraint ("spawn failed", observed on macOS 15), while a
+        // registration made at fresh app startup works. So: drop the broken
+        // registration, then relaunch once — the next startup registers clean.
+        if HelperManager.service.status == .enabled,
+           SMCController.probeHelperVersion() != kHelperVersion {
+            if CommandLine.arguments.contains("--helper-reset") {
+                bbLog.error("Helper still unreachable after a clean re-registration")
+            } else {
+                bbLog.info("Helper stale or unreachable — resetting registration and relaunching")
+                HelperManager.unregister()
+                let relauncher = Process()
+                relauncher.executableURL = URL(fileURLWithPath: "/bin/sh")
+                relauncher.arguments = ["-c",
+                    "sleep 2; exec /usr/bin/open -n \"$0\" --args --helper-reset",
+                    Bundle.main.bundlePath]
+                try? relauncher.run()
+                exit(0)   // nothing initialized yet — skip cleanup entirely
+            }
+        }
+
         Notifier.setup()
         smcController = SMCController()
         batteryReader = BatteryReader()
@@ -145,6 +174,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func cleanupAndRestore() {
+        // A duplicate instance terminates from the instance-lock guard before
+        // init completes: nothing to clean up, and the force-unwraps below
+        // would trap — worse, touching SMC would undo the primary instance's
+        // charging state.
+        guard batteryReader != nil else { return }
         batteryReader.stop()
 
         // Stop an active drain so the Mac isn't left running off the battery while plugged in

@@ -20,6 +20,8 @@ final class HelperService: NSObject, HelperProtocol {
 
     // MARK: - Capability detection
 
+    /// Must run on `queue` — `probed`/`supportsTahoe`/`supportsLegacy` have no
+    /// synchronization of their own; the serial queue is their only barrier.
     private func ensureProbed() {
         guard !probed else { return }
         probed = true
@@ -159,8 +161,8 @@ final class HelperService: NSObject, HelperProtocol {
     }
 
     func setMagSafeLED(_ raw: UInt8, reply: @escaping (Bool) -> Void) {
-        // Whitelist: system (0x00), off (0x01), green (0x03), orange fast blink (0x07)
-        guard [0x00, 0x01, 0x03, 0x07].contains(raw) else {
+        // Whitelist: system (0x00), green (0x03), orange fast blink (0x07)
+        guard [0x00, 0x03, 0x07].contains(raw) else {
             helperLog.error("Rejected ACLC value \(raw)")
             reply(false)
             return
@@ -187,10 +189,12 @@ final class HelperService: NSObject, HelperProtocol {
 
     func setLowPowerMode(_ enabled: Bool, reply: @escaping (Bool) -> Void) {
         queue.async {
-            // Daemon runs as root — pmset directly, no sudo
+            // Daemon runs as root — pmset directly, no sudo.
+            // Battery profile only (-b): Low Power Mode applies on battery and
+            // macOS itself suspends it on AC, even if the app never gets to.
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-            process.arguments = ["-a", "lowpowermode", enabled ? "1" : "0"]
+            process.arguments = ["-b", "lowpowermode", enabled ? "1" : "0"]
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             do {

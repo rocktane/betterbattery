@@ -54,15 +54,17 @@ $(APP_BUNDLE): $(APP_SOURCES) $(HELPER_SOURCES) $(CERT_HASH_FILE) Info.plist Bet
 	@echo "Built $(APP_BUNDLE)"
 
 install: build
-	@echo "Installing to $(INSTALL_DIR)/$(APP_NAME).app ..."
-	@rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
-	@cp -R $(APP_BUNDLE) "$(INSTALL_DIR)/$(APP_NAME).app"
+	@echo "Installing to $(INSTALL_DIR)/$(APP_NAME).app (admin required: the helper runs as root, so the bundle must not be user-writable) ..."
+	@sudo rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
+	@sudo cp -R $(APP_BUNDLE) "$(INSTALL_DIR)/$(APP_NAME).app"
+	@sudo chown -R root:wheel "$(INSTALL_DIR)/$(APP_NAME).app"
+	@sudo chmod -R go-w "$(INSTALL_DIR)/$(APP_NAME).app"
 	@echo "Installed. Launch from /Applications or Spotlight."
 
 uninstall:
 	@echo "Removing $(APP_NAME)..."
 	@"$(INSTALL_DIR)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)" --uninstall-helper 2>/dev/null || true
-	@rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
+	@sudo rm -rf "$(INSTALL_DIR)/$(APP_NAME).app"
 	@rm -f ~/Library/LaunchAgents/$(BUNDLE_ID).plist
 	@sudo rm -f /etc/sudoers.d/battery /etc/sudoers.d/battery.bak
 	@security delete-generic-password -s com.betterbattery.smc-hash >/dev/null 2>&1 || true
