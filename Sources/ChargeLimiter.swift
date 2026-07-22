@@ -20,6 +20,7 @@ class ChargeLimiter {
             if clamped != newValue {
                 bbLog.warning("Charge limit \(newValue) out of bounds, clamped to \(clamped)")
             }
+            if clamped != _limitPercentage { limitNotified = false }
             _limitPercentage = clamped
             defaults.set(clamped, forKey: "chargeLimitPercentage")
         }
@@ -44,6 +45,11 @@ class ChargeLimiter {
 
     private(set) var isActive: Bool = false
     private(set) var chargingEnabled: Bool = true
+
+    /// One "Charge limit reached" notification per hold event: armed again only when a new
+    /// event can start (unplug, limit change, top-up, limiter start/stop) — not on each
+    /// hysteresis cycle or SMC state resync while hovering around the limit.
+    private var limitNotified: Bool = false
 
     private var lastPercentage: Int = 0
     private var lastIsPluggedIn: Bool = false
@@ -82,6 +88,7 @@ class ChargeLimiter {
 
     func start() {
         isActive = true
+        limitNotified = false
         defaults.set(true, forKey: "chargeLimitEnabled")
 
         // Assert SMC state: ensure charging is physically enabled.
@@ -106,6 +113,7 @@ class ChargeLimiter {
         isActive = false
         thermalHold = false
         topUpActive = false
+        limitNotified = false
         timer?.invalidate()
         timer = nil
         defaults.set(false, forKey: "chargeLimitEnabled")
@@ -127,6 +135,7 @@ class ChargeLimiter {
     func activateTopUp() {
         guard isActive else { return }
         topUpActive = true
+        limitNotified = false
         if !chargingEnabled {
             if smc.enableCharging() {
                 chargingEnabled = true
@@ -221,6 +230,7 @@ class ChargeLimiter {
                 bbLog.info("Top Up reset on unplug")
             }
             thermalHold = false
+            limitNotified = false
             if !smc.disableCharging() {
                 bbLog.warning("Failed to disable charging on unplug")
             }
@@ -248,12 +258,15 @@ class ChargeLimiter {
         if temperature > thermalStopCharging && chargingEnabled {
             if smc.disableCharging() {
                 chargingEnabled = false
+                let newHold = !thermalHold
                 thermalHold = true
                 smc.setMagSafeLED(.orangeFastBlink)
                 bbLog.info("Thermal hold — charging stopped at \(temperature, format: .fixed(precision: 1))°C")
-                Notifier.send("Thermal protection",
-                              String(format: "Battery at %.1f°C — charging paused until it cools down.", temperature),
-                              id: "thermal")
+                if newHold {
+                    Notifier.send("Thermal protection",
+                                  String(format: "Battery at %.1f°C — charging paused until it cools down.", temperature),
+                                  id: "thermal")
+                }
             }
             onStateChange?()
             return
@@ -281,9 +294,12 @@ class ChargeLimiter {
         if percentage >= upperBound && chargingEnabled {
             if smc.disableCharging() {
                 chargingEnabled = false
-                Notifier.send("Charge limit reached",
-                              "Battery held at \(limitPercentage)% — charging paused.",
-                              id: "limit-reached")
+                if !limitNotified {
+                    limitNotified = true
+                    Notifier.send("Charge limit reached",
+                                  "Battery held at \(limitPercentage)% — charging paused.",
+                                  id: "limit-reached")
+                }
             } else {
                 bbLog.warning("Failed to disable charging at \(percentage)%%")
             }
