@@ -306,6 +306,9 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         model.cycleCount = currentState.cycleCount
         model.temperature = currentState.temperature
         model.uptime = formatUptimeCompact(bootUptime())
+        model.uptimeFull = formatUptimeFull(bootUptime())
+        model.cyclesSince = currentState.manufactureDate.map { Self.manufactureDateFormatter.string(from: $0) }
+        model.serviceRecommended = currentState.serviceRecommended
         model.isPluggedIn = currentState.isPluggedIn
         model.adapterWatts = currentState.adapterWatts
         // Actual power drawn by the computer: adapter input when available (works even when
@@ -928,6 +931,24 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             return ProcessInfo.processInfo.systemUptime
         }
         return Date().timeIntervalSince1970 - TimeInterval(boottime.tv_sec)
+    }
+
+    /// "dd MMMM yyyy" (e.g. "29 August 2024") — same language as the rest of the UI.
+    private static let manufactureDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.dateFormat = "dd MMMM yyyy"
+        return f
+    }()
+
+    /// Full uptime with every unit spelled out: "3 days 4 hours 12 minutes".
+    private func formatUptimeFull(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let parts = [(total / 86400, "day"), ((total % 86400) / 3600, "hour"),
+                     ((total % 3600) / 60, "minute")]
+        let visible = parts.drop(while: { $0.0 == 0 })
+        guard !visible.isEmpty else { return "0 minutes" }
+        return visible.map { "\($0.0) \($0.1)\($0.0 == 1 ? "" : "s")" }.joined(separator: " ")
     }
 
     /// Compact single-unit uptime in full words: days if ≥1 day, else hours if ≥1 h, else minutes.

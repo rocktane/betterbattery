@@ -15,6 +15,8 @@ struct BatteryState {
     var amperage: Int = 0          // mA (negative = discharging)
     var adapterWatts: Int = 0      // AC adapter rated wattage
     var systemPowerIn: Int = 0     // mW actually drawn by the computer (adapter input)
+    var manufactureDate: Date? = nil
+    var serviceRecommended: Bool = false  // macOS's own battery condition flag
 
     var timeRemaining: Int? {
         if isCharging {
@@ -106,6 +108,15 @@ class BatteryReader {
             if let timeToCharge = info[kIOPSTimeToFullChargeKey] as? Int, timeToCharge > 0 {
                 state.timeToCharge = timeToCharge
             }
+            // Battery condition as System Settings reports it: powerd publishes
+            // "Good" + an empty condition while the battery is Normal, and sets
+            // BatteryHealthCondition (e.g. "Check Battery") when service is due.
+            if let health = info[kIOPSBatteryHealthKey] as? String, health != kIOPSGoodValue {
+                state.serviceRecommended = true
+            }
+            if let condition = info[kIOPSBatteryHealthConditionKey] as? String, !condition.isEmpty {
+                state.serviceRecommended = true
+            }
         }
 
         // AC adapter rated wattage (e.g., 67W, 96W, 140W)
@@ -162,8 +173,50 @@ class BatteryReader {
                let systemPowerIn = telemetry["SystemPowerIn"] as? Int, systemPowerIn > 0 {
                 state.systemPowerIn = systemPowerIn
             }
+            // Battery manufacture date. Intel exposes the SBS bitfield; Apple Silicon
+            // encodes year + ISO week in the pack serial (same source coconutBattery uses —
+            // BatteryData.ManufactureDate is a lot code, not a date).
+            if let packed = props["ManufactureDate"] as? Int {
+                state.manufactureDate = Self.dateFromSBS(packed)
+            } else if let serial = props["Serial"] as? String {
+                state.manufactureDate = Self.dateFromSerial(serial)
+            }
             // Time values come from IOPowerSources only (same source as Stats app)
         }
+    }
+
+    /// Apple Silicon pack serials encode the manufacture date after the 3-char site code:
+    /// "F8Y13450…" → year digit 1, ISO week 34 → week of 23 August 2021. Returns that
+    /// week's Monday. The year digit maps to the most recent matching year not in the future.
+    private static func dateFromSerial(_ serial: String) -> Date? {
+        let chars = Array(serial)
+        guard chars.count >= 6,
+              let yearDigit = chars[3].wholeNumberValue, chars[3].isNumber,
+              let week = Int(String(chars[4...5])), (1...53).contains(week) else { return nil }
+        let calendar = Calendar(identifier: .iso8601)
+        let currentYear = calendar.component(.year, from: Date())
+        var year = currentYear - ((currentYear - yearDigit) % 10)
+        var comps = DateComponents()
+        comps.yearForWeekOfYear = year
+        comps.weekOfYear = week
+        comps.weekday = 2  // Monday
+        guard var date = calendar.date(from: comps) else { return nil }
+        if date > Date() {  // week later this year than today → previous decade
+            year -= 10
+            comps.yearForWeekOfYear = year
+            guard let earlier = calendar.date(from: comps) else { return nil }
+            date = earlier
+        }
+        return date
+    }
+
+    /// SBS packed bitfield (Intel): day in bits 0–4, month in 5–8, year-1980 in 9–15.
+    private static func dateFromSBS(_ packed: Int) -> Date? {
+        let day = packed & 0x1F
+        let month = (packed >> 5) & 0x0F
+        let year = 1980 + ((packed >> 9) & 0x7F)
+        guard (1...31).contains(day), (1...12).contains(month) else { return nil }
+        return DateComponents(calendar: .current, year: year, month: month, day: day).date
     }
 
     private func getProperties(_ service: io_service_t) -> [String: Any]? {

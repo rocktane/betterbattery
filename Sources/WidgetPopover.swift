@@ -40,6 +40,9 @@ struct WidgetModel: Equatable {
     var cycleCount = 0
     var temperature = 0.0
     var uptime = ""
+    var uptimeFull = ""            // every unit spelled out, for the card tooltip
+    var cyclesSince: String? = nil // battery manufacture date ("29 August 2024")
+    var serviceRecommended = false // macOS's battery condition (not a percentage threshold)
     var isPluggedIn = false
     var adapterWatts = 0
     var drawWatts = 0          // actual power drawn by the computer
@@ -458,6 +461,10 @@ final class WidgetViewController: NSViewController {
     private let healthValue = NSTextField(labelWithString: "")
     private let cyclesValue = NSTextField(labelWithString: "")
     private let tempValue = NSTextField(labelWithString: "")
+    // Card cells kept to attach tooltips (hover anywhere on the card)
+    private var healthCard: NSView?
+    private var cyclesCard: NSView?
+    private var uptimeCard: NSView?
     private let chevron = ChevronView(frame: .zero)
     private let fixedContainer = FlippedView()
     private let detailsContainer = FlippedView()
@@ -526,7 +533,8 @@ final class WidgetViewController: NSViewController {
     private let gridGap: CGFloat = 8
 
     /// Build one info card (caption + centered value) into `parent` at the given frame.
-    private func makeCard(_ caption: String, _ valueLabel: NSTextField, into parent: NSView, frame: NSRect) {
+    @discardableResult
+    private func makeCard(_ caption: String, _ valueLabel: NSTextField, into parent: NSView, frame: NSRect) -> NSView {
         let cell = NSView(frame: frame)
         cell.wantsLayer = true
         cell.layer?.cornerRadius = kCornerRadius
@@ -549,6 +557,7 @@ final class WidgetViewController: NSViewController {
         cell.addSubview(keyLabel)
 
         parent.addSubview(cell)
+        return cell
     }
 
     /// `count` equal cards across the content width, separated by the shared grid gap.
@@ -643,9 +652,9 @@ final class WidgetViewController: NSViewController {
         detailsContainer.layer?.masksToBounds = true
         detailsContainer.frame = NSRect(x: 0, y: Self.detailsBaseY, width: Self.width, height: 0)
         let dx = cardFrames(3, atY: 0)
-        makeCard("HEALTH", healthValue, into: detailsContainer, frame: dx[0])
-        makeCard("CYCLES", cyclesValue, into: detailsContainer, frame: dx[1])
-        makeCard("UPTIME", uptimeValue, into: detailsContainer, frame: dx[2])
+        healthCard = makeCard("HEALTH", healthValue, into: detailsContainer, frame: dx[0])
+        cyclesCard = makeCard("CYCLES", cyclesValue, into: detailsContainer, frame: dx[1])
+        uptimeCard = makeCard("UPTIME", uptimeValue, into: detailsContainer, frame: dx[2])
         uptimeValue.font = .systemFont(ofSize: 14, weight: .semibold)
         view.addSubview(detailsContainer)
 
@@ -948,6 +957,14 @@ final class WidgetViewController: NSViewController {
         healthValue.stringValue = "\(m.health)%"
         cyclesValue.stringValue = "\(m.cycleCount)"
         tempValue.stringValue = "\(Int(m.temperature.rounded()))°"
+
+        // Card tooltips: battery condition straight from macOS (same flag System Settings
+        // shows), cycles accrued since the battery's manufacture date, and the exact uptime.
+        healthCard?.toolTip = m.serviceRecommended
+            ? "Service Recommended — Your battery's ability to hold charge is less than when it was new, or it isn't functioning normally."
+            : "Normal — Your battery is functioning normally."
+        cyclesCard?.toolTip = m.cyclesSince.map { "Since \($0)" }
+        uptimeCard?.toolTip = m.uptimeFull
 
         // dock states
         limitBtn.isActiveState = m.limitActive
