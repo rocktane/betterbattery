@@ -22,13 +22,26 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
-      - name: Create signing certificate
+      - name: Import signing certificate
+        env:
+          CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
+          CERT_PASS: ${{ secrets.SIGNING_CERT_PASS }}
         run: |
           security create-keychain -p ci build.keychain
           security set-keychain-settings -lut 21600 build.keychain
           security unlock-keychain -p ci build.keychain
           security list-keychains -d user -s build.keychain
-          CERT_KEYCHAIN=build.keychain ./scripts/make-cert.sh "BetterBattery Signing"
+          if [ -n "$CERT_P12" ]; then
+            # Canonical identity: every release (and local dev builds) share it,
+            # so the daemon's cert pin survives upgrades.
+            echo "$CERT_P12" | base64 -d > cert.p12
+            security import cert.p12 -k build.keychain -P "$CERT_PASS" -T /usr/bin/codesign
+            rm -f cert.p12
+          else
+            # Forks without the secret: ephemeral identity — the app's
+            # re-register path heals the pin change on upgrade.
+            CERT_KEYCHAIN=build.keychain ./scripts/make-cert.sh "BetterBattery Signing"
+          fi
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci build.keychain >/dev/null
 
       - name: Build
