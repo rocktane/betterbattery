@@ -38,6 +38,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         Notifier.setup()
         smcController = SMCController()
+
+        // An already-approved daemon survives app upgrades (SMAppService stays
+        // .enabled), so a stale binary would keep serving an old protocol and
+        // fail silently. Version mismatch, a daemon pinning another signing
+        // identity (rejects us → no answer), or a registration launchd can no
+        // longer spawn all land here: re-register to reload the daemon.
+        if HelperManager.service.status == .enabled {
+            let daemonVersion = smcController.helperVersion()
+            if daemonVersion != kHelperVersion {
+                bbLog.info("Helper stale or unreachable (\(daemonVersion ?? "no answer")) — re-registering daemon")
+                HelperManager.reregister()
+                smcController.redetectCapabilities()
+            }
+        }
         batteryReader = BatteryReader()
         chargeLimiter = ChargeLimiter(smc: smcController)
         statusBarController = StatusBarController(

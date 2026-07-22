@@ -616,9 +616,6 @@ class StatusBarController: NSObject, WidgetActionDelegate {
                 return
             }
             dischargeActive = true
-            // LED off while draining — the charger is virtually disconnected.
-            chargeLimiter.ledOverride = .off
-            smc.setMagSafeLED(.off)
             bbLog.info("Active discharge started at \(self.currentState.percentage)%")
         }
         updateStatusBarImage(state: currentState)
@@ -633,7 +630,6 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             _ = smc.disableDischarge()
         }
         dischargeActive = false
-        chargeLimiter.ledOverride = nil
         smc.setMagSafeLED(.system)   // limiter re-syncs (e.g. back to green) on next check
         if notify {
             Notifier.send("Discharge complete",
@@ -890,19 +886,30 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             _ = smc.enableCharging()
             smc.setMagSafeLED(.system)
 
-            // Remove LaunchAgent
+            // Remove LaunchAgent and the daemon registration (otherwise a ghost
+            // entry survives in System Settings → Login Items, pointing at a
+            // binary that no longer exists)
             LaunchAtLogin.disable()
+            HelperManager.unregister()
 
-            // Remove sudoers
-            let script = "do shell script \"rm -f /etc/sudoers.d/battery\" with administrator privileges"
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-
-            // Remove app
+            // Remove the app. Escalate through a single admin prompt only when
+            // needed: leftover pre-daemon sudoers, or a root-owned bundle
+            // (installed via `make install`) that removeItem cannot delete.
+            let fm = FileManager.default
             let appPath = Bundle.main.bundlePath
-            try? FileManager.default.removeItem(atPath: appPath)
+            let hasLegacySudoers = fm.fileExists(atPath: "/etc/sudoers.d/battery")
+                || fm.fileExists(atPath: "/etc/sudoers.d/battery.bak")
+            var appRemoved = false
+            if !hasLegacySudoers {
+                appRemoved = (try? fm.removeItem(atPath: appPath)) != nil
+            }
+            if hasLegacySudoers || !appRemoved {
+                let script = "do shell script \"rm -rf '\(appPath)' /etc/sudoers.d/battery /etc/sudoers.d/battery.bak\" with administrator privileges"
+                if let appleScript = NSAppleScript(source: script) {
+                    var error: NSDictionary?
+                    appleScript.executeAndReturnError(&error)
+                }
+            }
 
             NSApp.terminate(nil)
         }

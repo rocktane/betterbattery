@@ -3,7 +3,6 @@ import os.log
 
 enum MagSafeLEDColor: UInt8 {
     case system = 0x00          // Contrôle par macOS (défaut)
-    case off = 0x01             // Éteinte (décharge active en cours)
     case green = 0x03           // Vert fixe (limite atteinte)
     case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }
@@ -39,6 +38,25 @@ class SMCController {
         return connection?.synchronousRemoteObjectProxyWithErrorHandler { error in
             bbLog.warning("Helper XPC error: \(error.localizedDescription)")
         } as? HelperProtocol
+    }
+
+    // MARK: - Version
+
+    /// Daemon protocol version, or nil if the daemon didn't answer within `timeout`.
+    /// Uses the async proxy: a daemon that launchd cannot spawn must not hang the
+    /// app at startup the way a synchronous call would.
+    func helperVersion(timeout: TimeInterval = 3) -> String? {
+        _ = proxy()  // ensure the connection exists
+        guard let c = connection else { return nil }
+        let sem = DispatchSemaphore(value: 0)
+        var version: String?
+        let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
+        p?.getVersion { v in
+            version = v
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout)
+        return version
     }
 
     // MARK: - Key Operations
