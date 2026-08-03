@@ -33,7 +33,9 @@ struct WidgetModel: Equatable {
     var stopChargingBeforeSleep = false
     var lowPowerModeOn = false
     var displayMode: MenuBarDisplayMode = .percentage
-    var autoLPMThreshold = 0
+    var autoLPMThreshold = 0   // percentage scale (0 = off)
+    var autoLPMMinutes = 0     // time-remaining scale, in minutes (0 = off)
+    var autoLPMMode = 0        // 0 = %, 1 = time
     var launchAtLogin = false
     var appTheme = 0   // 0 = system, 1 = light, 2 = dark
     var health = 100
@@ -61,6 +63,7 @@ protocol WidgetActionDelegate: AnyObject {
     func widgetSetAmplitude(_ value: Int)
     func widgetSetDisplayMode(_ mode: MenuBarDisplayMode)
     func widgetSetAutoLPM(_ threshold: Int)
+    func widgetSetAutoLPMMode(_ mode: Int)
     func widgetToggleLowPowerMode()
     func widgetToggleCaffeine()
     func widgetToggleStopChargingBeforeSleep()
@@ -86,7 +89,8 @@ final class FlippedView: NSView {
 // MARK: - Custom segmented picker (HTML .segc look)
 
 final class SegmentedPicker: NSView {
-    private let labels: [String]
+    /// Mutable so a picker can swap its scale at runtime (see the Auto LPM % / Time toggle).
+    var labels: [String] { didSet { needsDisplay = true } }
     private let pad: CGFloat = 3
     var selectedIndex = 0 { didSet { needsDisplay = true } }
     var onSelect: ((Int) -> Void)?
@@ -483,6 +487,7 @@ final class WidgetViewController: NSViewController {
     private let displaySeg = SegmentedPicker(labels: ["%", "Time", "Icon"])
     private let themeSeg = SegmentedPicker(labels: ["System", "Light", "Dark"])
     private let lpmSeg = SegmentedPicker(labels: ["Off", "10", "20", "30", "40", "50"])
+    private let lpmModeSeg = SegmentedPicker(labels: ["%", "Time"])
     private let launchSwitch = ToggleSwitch(frame: .zero)
     private let sleepSwitch = ToggleSwitch(frame: .zero)
 
@@ -493,6 +498,9 @@ final class WidgetViewController: NSViewController {
     private let ampValues = [2, 5, 8, 10]
     private let displayValues: [MenuBarDisplayMode] = [.percentage, .timeRemaining, .iconOnly]
     private let lpmValues = [0, 10, 20, 30, 40, 50]
+    private let lpmLabels = ["Off", "10", "20", "30", "40", "50"]
+    private let lpmTimeValues = [0, 10, 20, 30, 40]
+    private let lpmTimeLabels = ["Off", "10m", "20m", "30m", "40m"]
 
     override func loadView() {
         let v = FlippedView(frame: NSRect(x: 0, y: 0, width: Self.width, height: 300))
@@ -749,13 +757,24 @@ final class WidgetViewController: NSViewController {
         c.addSubview(divider)
 
         // Two-line row: uppercase caption on top, full-width control below (no overlap).
-        func addSegRow(_ title: String, _ seg: SegmentedPicker, _ onSelect: @escaping (Int) -> Void) {
+        // `trailing` sits on the caption line, right-aligned (used for the Auto LPM scale toggle).
+        func addSegRow(_ title: String, _ seg: SegmentedPicker,
+                       trailing: SegmentedPicker? = nil,
+                       _ onSelect: @escaping (Int) -> Void) {
             let caption = NSTextField(labelWithString: title.uppercased())
             caption.font = .systemFont(ofSize: 10, weight: .semibold)
             caption.textColor = .tertiaryLabelColor
-            caption.frame = NSRect(x: P, y: cy, width: innerW, height: 13)
+            let trailingW: CGFloat = 78
+            let captionW = trailing == nil ? innerW : innerW - trailingW - 8
+            caption.frame = NSRect(x: P, y: cy, width: captionW, height: 13)
             c.addSubview(caption)
-            cy += 18
+            if let t = trailing {
+                t.frame = NSRect(x: Self.width - P - trailingW, y: cy - 4, width: trailingW, height: 21)
+                c.addSubview(t)
+                cy += 24
+            } else {
+                cy += 18
+            }
 
             seg.onSelect = onSelect
             seg.frame = NSRect(x: P, y: cy, width: innerW, height: 30)
@@ -775,8 +794,13 @@ final class WidgetViewController: NSViewController {
         addSegRow("Theme", themeSeg) { [weak self] i in
             self?.delegate?.widgetSetTheme(i)
         }
-        addSegRow("Auto Low Power Mode", lpmSeg) { [weak self] i in
-            guard let s = self else { return }; s.delegate?.widgetSetAutoLPM(s.lpmValues[i])
+        lpmModeSeg.onSelect = { [weak self] i in
+            self?.delegate?.widgetSetAutoLPMMode(i)
+        }
+        addSegRow("Auto Low Power Mode", lpmSeg, trailing: lpmModeSeg) { [weak self] i in
+            guard let s = self else { return }
+            let values = s.lpmModeSeg.selectedIndex == 1 ? s.lpmTimeValues : s.lpmValues
+            s.delegate?.widgetSetAutoLPM(values[min(i, values.count - 1)])
         }
 
         // Switch rows (narrow control → stays inline)
@@ -993,7 +1017,13 @@ final class WidgetViewController: NSViewController {
         ampSeg.selectedIndex = ampValues.firstIndex(of: max(2, min(10, m.upperBound - m.limitPercentage))) ?? -1
         displaySeg.selectedIndex = displayValues.firstIndex(of: m.displayMode) ?? 0
         themeSeg.selectedIndex = max(0, min(2, m.appTheme))
-        lpmSeg.selectedIndex = lpmValues.firstIndex(of: m.autoLPMThreshold) ?? 0
+        let lpmTimeMode = (m.autoLPMMode == 1)
+        lpmModeSeg.selectedIndex = lpmTimeMode ? 1 : 0
+        let wantedLabels = lpmTimeMode ? lpmTimeLabels : lpmLabels
+        if lpmSeg.labels != wantedLabels { lpmSeg.labels = wantedLabels }
+        lpmSeg.selectedIndex = lpmTimeMode
+            ? (lpmTimeValues.firstIndex(of: m.autoLPMMinutes) ?? 0)
+            : (lpmValues.firstIndex(of: m.autoLPMThreshold) ?? 0)
         launchSwitch.isOn = m.launchAtLogin
         sleepSwitch.isOn = m.stopChargingBeforeSleep
     }
