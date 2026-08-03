@@ -60,7 +60,10 @@ class StatusBarController: NSObject, WidgetActionDelegate {
 
     // Auto Low Power Mode
     private enum AutoLPMState { case idle, activated, userOverridden }
-    private var autoLPMThreshold: Int = 0  // 0 = disabled
+    private enum AutoLPMMode: Int { case percentage = 0, time = 1 }
+    private var autoLPMThreshold: Int = 0  // percentage, 0 = disabled
+    private var autoLPMMinutes: Int = 0    // minutes of time remaining, 0 = disabled
+    private var autoLPMMode: AutoLPMMode = .percentage
     private var autoLPMState: AutoLPMState = .idle
 
     // App theme: 0 = system, 1 = light, 2 = dark
@@ -81,6 +84,12 @@ class StatusBarController: NSObject, WidgetActionDelegate {
 
         let savedLPM = defaults.integer(forKey: "autoLPMThreshold")
         autoLPMThreshold = [0, 10, 20, 30, 40, 50].contains(savedLPM) ? savedLPM : 0
+
+        let savedLPMMinutes = defaults.integer(forKey: "autoLPMMinutes")
+        autoLPMMinutes = [0, 10, 20, 30, 40].contains(savedLPMMinutes) ? savedLPMMinutes : 0
+
+        let savedLPMMode = defaults.integer(forKey: "autoLPMMode")
+        autoLPMMode = AutoLPMMode(rawValue: savedLPMMode) ?? .percentage
 
         let savedTheme = defaults.integer(forKey: "appTheme")
         appTheme = [0, 1, 2].contains(savedTheme) ? savedTheme : 0
@@ -117,7 +126,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         )
 
         updateStatusBarImage(state: state)
-        checkAutoLPM(percentage: state.percentage)
+        checkAutoLPM(state: state)
         checkDischarge(state: state)
         refreshWidget()
         if historyWindow?.isVisible == true {
@@ -300,6 +309,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         model.lowPowerModeOn = ProcessInfo.processInfo.isLowPowerModeEnabled
         model.displayMode = displayMode
         model.autoLPMThreshold = autoLPMThreshold
+        model.autoLPMMinutes = autoLPMMinutes
+        model.autoLPMMode = autoLPMMode.rawValue
         model.launchAtLogin = LaunchAtLogin.isEnabled
         model.appTheme = appTheme
         model.health = currentState.health
@@ -593,8 +604,23 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     }
 
     func widgetSetAutoLPM(_ threshold: Int) {
-        autoLPMThreshold = threshold
-        defaults.set(autoLPMThreshold, forKey: "autoLPMThreshold")
+        switch autoLPMMode {
+        case .percentage:
+            autoLPMThreshold = threshold
+            defaults.set(autoLPMThreshold, forKey: "autoLPMThreshold")
+        case .time:
+            autoLPMMinutes = threshold
+            defaults.set(autoLPMMinutes, forKey: "autoLPMMinutes")
+        }
+        autoLPMState = .idle
+        refreshWidget()
+    }
+
+    /// Switches the Auto LPM scale (0 = battery %, 1 = time remaining). Each scale keeps
+    /// its own threshold, so toggling back and forth doesn't lose the other setting.
+    func widgetSetAutoLPMMode(_ mode: Int) {
+        autoLPMMode = AutoLPMMode(rawValue: mode) ?? .percentage
+        defaults.set(autoLPMMode.rawValue, forKey: "autoLPMMode")
         autoLPMState = .idle
         refreshWidget()
     }
@@ -735,7 +761,14 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     func widgetUninstall() { uninstall() }
     func widgetQuit() { quit() }
 
-    private func checkAutoLPM(percentage: Int) {
+    private func checkAutoLPM(state: BatteryState) {
+        switch autoLPMMode {
+        case .percentage: checkAutoLPMByPercentage(state.percentage)
+        case .time:       checkAutoLPMByTime(state)
+        }
+    }
+
+    private func checkAutoLPMByPercentage(_ percentage: Int) {
         guard autoLPMThreshold > 0, percentage > 0 else { return }
 
         let disableThreshold = autoLPMThreshold + 20
@@ -761,6 +794,54 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             }
         case .userOverridden:
             if percentage >= disableThreshold || isPluggedIn {
+                autoLPMState = .idle
+            }
+        }
+    }
+
+    /// Time-remaining variant: triggers on IOKit's estimated minutes left instead of a
+    /// percentage. Same +20 hysteresis, expressed in minutes.
+    private func checkAutoLPMByTime(_ state: BatteryState) {
+        guard autoLPMMinutes > 0 else { return }
+
+        let isPluggedIn = state.isPluggedIn
+
+        // No usable estimate (charging, or the gauge is still settling). Plugging in still
+        // releases an automatic activation — the trigger condition can no longer hold.
+        guard let minutes = state.timeToEmpty, minutes > 0, minutes < 6000, !isPluggedIn else {
+            if isPluggedIn {
+                if autoLPMState == .activated {
+                    setLowPowerMode(false)
+                    Notifier.send("Low Power Mode disabled",
+                                  "Charger connected — Low Power Mode turned off automatically.",
+                                  id: "auto-lpm")
+                }
+                autoLPMState = .idle
+            }
+            return
+        }
+
+        let disableThreshold = autoLPMMinutes + 20
+
+        switch autoLPMState {
+        case .idle:
+            if minutes <= autoLPMMinutes {
+                setLowPowerMode(true)
+                autoLPMState = .activated
+                Notifier.send("Low Power Mode enabled",
+                              "\(formatMinutesVerbose(minutes)) of battery left — Low Power Mode turned on automatically.",
+                              id: "auto-lpm")
+            }
+        case .activated:
+            if minutes >= disableThreshold {
+                setLowPowerMode(false)
+                autoLPMState = .idle
+                Notifier.send("Low Power Mode disabled",
+                              "\(formatMinutesVerbose(minutes)) of battery left — Low Power Mode turned off automatically.",
+                              id: "auto-lpm")
+            }
+        case .userOverridden:
+            if minutes >= disableThreshold {
                 autoLPMState = .idle
             }
         }
