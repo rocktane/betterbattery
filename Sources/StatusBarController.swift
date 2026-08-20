@@ -69,7 +69,9 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     // App theme: 0 = system, 1 = light, 2 = dark
     private var appTheme: Int = 0
 
-    // Keep-awake (caffeine) power assertion
+    // Keep-awake (caffeine) power assertion. A system-idle assertion alone lets
+    // the display dim and turn off, which makes an "Awake" mode appear broken.
+    // Preventing display idle sleep also prevents idle system sleep.
     private var caffeineAssertionID: IOPMAssertionID = 0
     private var caffeineActive = false
 
@@ -680,7 +682,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             if caffeineAssertionID == 0 {
                 var aid: IOPMAssertionID = 0
                 let result = IOPMAssertionCreateWithName(
-                    kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                    kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
                     IOPMAssertionLevel(kIOPMAssertionLevelOn),
                     "BetterBattery — Éveil actif" as CFString,
                     &aid

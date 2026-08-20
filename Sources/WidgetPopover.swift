@@ -641,7 +641,7 @@ final class WidgetViewController: NSViewController {
         limitBtn.toolTip = "Hold the charge at the configured limit to preserve battery health"
         topUpBtn.toolTip = "Temporarily charge to 100%, then return to the limit"
         dischargeBtn.toolTip = "Actively discharge the battery down to the charge limit while plugged in"
-        caffeineBtn.toolTip = "Keep the Mac awake (prevent sleep)"
+        caffeineBtn.toolTip = "Keep the Mac and display awake (prevent idle sleep)"
         lpmBtn.toolTip = "Toggle macOS Low Power Mode"
 
         // Charging info cards (usage · charger) in a clipping container: shown on the

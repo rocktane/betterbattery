@@ -12,6 +12,7 @@ Menu bar app for macOS that limits battery charging via SMC to preserve battery 
 - Controls the MagSafe LED color to reflect charging state
 - Optionally stops charging before sleep so macOS doesn't charge to 100% overnight
 - Low Power Mode toggle
+- Awake mode to prevent idle display and system sleep
 - Launch at login
 
 ## Requirements
