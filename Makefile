@@ -89,3 +89,10 @@ test:
 	@$(BUILD_DIR)/tests/battery-reader
 	$(SWIFTC) Sources/ChargeLimiter.swift Tests/ChargeLimiterTests.swift -o $(BUILD_DIR)/tests/charge-limiter
 	@$(BUILD_DIR)/tests/charge-limiter
+
+# Explicit live test: applies the saved user target and briefly exercises Top Up.
+.PHONY: test-native-live
+test-native-live:
+	@mkdir -p $(BUILD_DIR)/tests
+	$(SWIFTC) Sources/NativeChargeLimit.swift Sources/SMCController.swift Sources/HelperReply.swift Sources/ChargeLimiter.swift Shared/HelperProtocol.swift Tests/NativeChargeLimitLiveTests.swift -o $(BUILD_DIR)/tests/native-charge-limit-live
+	@$(BUILD_DIR)/tests/native-charge-limit-live --apply-user-limit

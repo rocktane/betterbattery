@@ -74,3 +74,18 @@ Aucune installation dans `/Applications` ni relance de l’application personnel
 1. **Historique de santé sur plusieurs mois.** Enregistrer capacité, cycles, source de mesure et changements de batterie, puis montrer une tendance plutôt qu’un pourcentage isolé.
 2. **Charge prête à une heure choisie.** Un Top Up planifié avant un départ, qui revient automatiquement au mode de préservation une fois terminé ou débranché.
 3. **Diagnostic exportable et expurgé.** Exporter version macOS, disponibilité des capteurs, état du helper et capacités SMC, sans numéro de série, pour diagnostiquer rapidement les régressions après une mise à jour.
+
+## Complément après validation du contrôle matériel
+
+La publication 1.4.4 a révélé que les anciennes clés de charge (`CHTE`, `CH0B`, `CH0C`) ne sont plus accessibles sur le firmware de ce Mac. Le lecteur SMC est identique à celui de la 1.4.2 ; le diagnostic direct confirme que le helper/XPC n'est pas la cause de cette indisponibilité.
+
+Un backend natif a donc été ajouté dans `NativeChargeLimit.swift` via le client PowerUI utilisé par Réglages Système. Cette interface privée est chargée dynamiquement, avec vérification des signatures des méthodes avant appel. Elle reste susceptible d'évoluer lors d'une mise à jour ; les systèmes où elle est absente conservent l'ancien contrôle SMC.
+
+Sur ce Mac, les limites acceptées sont 80, 85, 90, 95 et 100 %. L'application adapte les choix affichés. macOS gère l'hystérésis, la protection thermique et la veille ; les réglages manuels correspondants et Drain sont désactivés dans ce mode. Top Up passe à 100 %, puis rétablit la limite lorsqu'il est annulé ou que le chargeur est débranché. Les limitations natives peuvent occasionnellement monter à 100 % pour la calibration, conformément au fonctionnement Apple.
+
+Validation réelle avec `make test-native-live` : la machine d'état de production applique la limite utilisateur de 80 %, relit la valeur effective (y compris l'état d'activation), passe à 100 % pour Top Up, puis restaure 80 %. Les hooks de veille/réveil conservent 80 % ; une veille matérielle complète n'est pas simulée par ce test. Le Mac a été laissé à 80 %.
+
+Références de diagnostic :
+- https://github.com/charlie0129/batt/issues/152
+- https://github.com/charlie0129/batt/tree/master/pkg/powerui
+- https://support.apple.com/en-ie/102338

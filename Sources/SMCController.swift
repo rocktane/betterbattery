@@ -14,6 +14,15 @@ class SMCController {
     private(set) var supportsLegacy: Bool = false
     private(set) var isAvailable: Bool = false
 
+    private var nativeController: NativeChargeLimit?
+    var usesNativeChargeLimit: Bool { nativeController != nil && !supportsTahoe && !supportsLegacy }
+    var nativeChargeLimits: [Int] { nativeController?.availableLimits ?? [] }
+    var nativeChargeLimit: Int? { nativeController?.currentLimit }
+
+    func setNativeChargeLimit(_ limit: Int) -> Bool {
+        nativeController?.setLimit(limit) ?? false
+    }
+
     init() {
         detectCapabilities()
     }
@@ -51,7 +60,10 @@ class SMCController {
     }
 
     func enableCharging() -> Bool {
-        Self.request { proxy, reply in proxy.enableCharging(reply: reply) } ?? false
+        // Native limits are managed explicitly by ChargeLimiter; startup must
+        // not erase a limit the user configured in System Settings.
+        if usesNativeChargeLimit { return true }
+        return Self.request { proxy, reply in proxy.enableCharging(reply: reply) } ?? false
     }
 
     func disableCharging() -> Bool {
@@ -100,8 +112,14 @@ class SMCController {
         }
         supportsTahoe = result?.0 ?? false
         supportsLegacy = result?.1 ?? false
-        isAvailable = supportsTahoe || supportsLegacy
-        if result == nil {
+        if !supportsTahoe && !supportsLegacy {
+            nativeController = NativeChargeLimit.connect()
+            if nativeController?.availableLimits.isEmpty == true { nativeController = nil }
+        } else {
+            nativeController = nil
+        }
+        isAvailable = supportsTahoe || supportsLegacy || usesNativeChargeLimit
+        if result == nil && !usesNativeChargeLimit {
             bbLog.warning("Helper daemon unreachable — charge control unavailable")
         }
     }

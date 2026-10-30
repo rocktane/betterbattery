@@ -303,6 +303,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         model.etaText = etaText()
         model.isCharging = currentState.isCharging
         model.limitActive = chargeLimiter.isActive
+        model.usesNativeChargeLimit = smc.usesNativeChargeLimit
+        model.nativeChargeLimits = smc.nativeChargeLimits
         model.limitPercentage = chargeLimiter.limitPercentage
         model.lowerBound = chargeLimiter.lowerBound
         model.upperBound = chargeLimiter.upperBound
@@ -342,6 +344,9 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     /// Text shown under the bar: the remaining time when known, otherwise a contextual
     /// message so the line is never empty.
     private func etaText() -> String {
+        if smc.usesNativeChargeLimit && chargeLimiter.isActive && !chargeLimiter.topUpActive {
+            return "macOS charge limit: \(chargeLimiter.limitPercentage)%"
+        }
         if let t = effectiveTimeRemaining() {
             return "\(formatMinutesVerbose(t.minutes)) \(t.label)"
         }
@@ -380,6 +385,8 @@ class StatusBarController: NSObject, WidgetActionDelegate {
             // (the limit is actively protecting the battery); collapse to just the plug icon
             // only once genuinely fully charged (100%), same as the other idle states.
             return ("Paused", currentState.percentage >= 100)
+        } else if smc.usesNativeChargeLimit && chargeLimiter.isActive && currentState.isPluggedIn && !currentState.isCharging {
+            return ("Limit \(chargeLimiter.limitPercentage)%", false)
         } else if currentState.isCharging {
             return ("Charging", false)
         } else if currentState.isPluggedIn {
@@ -625,6 +632,7 @@ class StatusBarController: NSObject, WidgetActionDelegate {
     private(set) var dischargeActive = false
 
     func widgetToggleDischarge() {
+        guard !smc.usesNativeChargeLimit else { return }
         if dischargeActive {
             stopDischarge(notify: false)
         } else {

@@ -26,6 +26,8 @@ struct WidgetModel: Equatable {
     var etaText: String? = nil
     var isCharging = false
     var limitActive = false
+    var usesNativeChargeLimit = false
+    var nativeChargeLimits: [Int] = []
     var limitPercentage = 80
     var lowerBound = 75
     var upperBound = 85
@@ -89,6 +91,7 @@ final class FlippedView: NSView {
 // MARK: - Custom segmented picker (HTML .segc look)
 
 final class SegmentedPicker: NSView {
+    var isEnabled = true { didSet { alphaValue = isEnabled ? 1 : 0.4 } }
     /// Mutable so a picker can swap its scale at runtime (see the Auto LPM % / Time toggle).
     var labels: [String] { didSet { needsDisplay = true } }
     private let pad: CGFloat = 3
@@ -144,6 +147,7 @@ final class SegmentedPicker: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
         let p = convert(event.locationInWindow, from: nil)
         let idx = max(0, min(labels.count - 1, Int((p.x - pad) / segWidth)))
         selectedIndex = idx
@@ -154,6 +158,7 @@ final class SegmentedPicker: NSView {
 // MARK: - Custom toggle switch (HTML .sw look)
 
 final class ToggleSwitch: NSView {
+    var isEnabled = true { didSet { alphaValue = isEnabled ? 1 : 0.4 } }
     var isOn = false { didSet { needsDisplay = true } }
     var onToggle: ((Bool) -> Void)?
 
@@ -181,6 +186,7 @@ final class ToggleSwitch: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
         isOn.toggle()
         onToggle?(isOn)
     }
@@ -494,7 +500,9 @@ final class WidgetViewController: NSViewController {
     private var statTiles: [NSView] = []
     private var lastAppliedModel: WidgetModel?
 
-    private let limitValues = [60, 70, 80, 90, 100]
+    private var limitValues: [Int] {
+        model.usesNativeChargeLimit ? model.nativeChargeLimits : [60, 70, 80, 90, 100]
+    }
     private let ampValues = [2, 5, 8, 10]
     private let displayValues: [MenuBarDisplayMode] = [.percentage, .timeRemaining, .iconOnly]
     private let lpmValues = [0, 10, 20, 30, 40, 50]
@@ -1006,10 +1014,12 @@ final class WidgetViewController: NSViewController {
         dischargeBtn.isActiveState = m.dischargeActive
         // Draining works with or without the limiter — it just needs the adapter and
         // a percentage above the configured limit (the drain target).
-        dischargeBtn.isEnabledState = m.dischargeActive
-            || (m.isPluggedIn && m.percentage > m.limitPercentage)
+        dischargeBtn.isEnabledState = !m.usesNativeChargeLimit && (m.dischargeActive
+            || (m.isPluggedIn && m.percentage > m.limitPercentage))
         // Tooltip explains why the button is greyed out when it is.
-        if m.dischargeActive {
+        if m.usesNativeChargeLimit {
+            dischargeBtn.toolTip = "Manual drain is unavailable with macOS charge limits"
+        } else if m.dischargeActive {
             dischargeBtn.toolTip = "Stop draining and reconnect the adapter"
         } else if !m.isPluggedIn {
             dischargeBtn.toolTip = "Plug in the charger to drain — on battery it already discharges naturally"
@@ -1022,6 +1032,15 @@ final class WidgetViewController: NSViewController {
         lpmBtn.isActiveState = m.lowPowerModeOn
 
         // settings controls
+        let limitLabels = limitValues.map(String.init)
+        if limitSeg.labels != limitLabels { limitSeg.labels = limitLabels }
+        limitBtn.toolTip = m.usesNativeChargeLimit
+            ? "Use the macOS charge limit; macOS manages charging, temperature and sleep, and may occasionally charge to 100% for calibration"
+            : "Hold the charge at the configured limit to preserve battery health"
+        ampSeg.isEnabled = !m.usesNativeChargeLimit
+        ampSeg.toolTip = m.usesNativeChargeLimit ? "macOS manages hysteresis automatically" : nil
+        sleepSwitch.isEnabled = !m.usesNativeChargeLimit
+        sleepSwitch.toolTip = m.usesNativeChargeLimit ? "The macOS charge limit also applies during sleep" : nil
         limitSeg.selectedIndex = limitValues.firstIndex(of: m.limitPercentage) ?? -1
         ampSeg.selectedIndex = ampValues.firstIndex(of: max(2, min(10, m.upperBound - m.limitPercentage))) ?? -1
         displaySeg.selectedIndex = displayValues.firstIndex(of: m.displayMode) ?? 0
@@ -1034,7 +1053,7 @@ final class WidgetViewController: NSViewController {
             ? (lpmTimeValues.firstIndex(of: m.autoLPMMinutes) ?? 0)
             : (lpmValues.firstIndex(of: m.autoLPMThreshold) ?? 0)
         launchSwitch.isOn = m.launchAtLogin
-        sleepSwitch.isOn = m.stopChargingBeforeSleep
+        sleepSwitch.isOn = !m.usesNativeChargeLimit && m.stopChargingBeforeSleep
     }
 
     // MARK: Control actions
