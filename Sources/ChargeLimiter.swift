@@ -16,6 +16,10 @@ class ChargeLimiter {
     var limitPercentage: Int {
         get { _limitPercentage }
         set {
+            guard !smc.usesNativeChargeLimit || smc.nativeChargeLimits.contains(newValue) else {
+                bbLog.warning("Unsupported native charge limit \(newValue)")
+                return
+            }
             let clamped = min(100, max(20, newValue))
             if clamped != newValue {
                 bbLog.warning("Charge limit \(newValue) out of bounds, clamped to \(clamped)")
@@ -61,9 +65,10 @@ class ChargeLimiter {
 
     var upperBound: Int {
         if topUpActive { return 105 } // Effectively no upper limit
+        if smc.usesNativeChargeLimit { return limitPercentage }
         return min(100, limitPercentage + hysteresisAmplitude)
     }
-    var lowerBound: Int { max(0, limitPercentage - hysteresisAmplitude) }
+    var lowerBound: Int { max(0, limitPercentage - (smc.usesNativeChargeLimit ? 5 : hysteresisAmplitude)) }
 
     init(smc: SMCController, defaults: UserDefaults = .standard) {
         self.smc = smc
@@ -84,6 +89,10 @@ class ChargeLimiter {
             bbLog.warning("Invalid saved amplitude \(savedAmplitude) — using default 5")
             defaults.removeObject(forKey: "hysteresisAmplitude")
         }
+        if smc.usesNativeChargeLimit && !smc.nativeChargeLimits.contains(_limitPercentage) {
+            _limitPercentage = smc.nativeChargeLimits.first ?? 80
+            defaults.set(_limitPercentage, forKey: "chargeLimitPercentage")
+        }
         stopChargingBeforeSleep = defaults.bool(forKey: "stopChargingBeforeSleep")
     }
 
@@ -91,6 +100,12 @@ class ChargeLimiter {
         isActive = true
         limitNotified = false
         defaults.set(true, forKey: "chargeLimitEnabled")
+
+        if smc.usesNativeChargeLimit {
+            if applyNativeLimit() { startTimer() }
+            onStateChange?()
+            return
+        }
 
         // Assert SMC state: ensure charging is physically enabled.
         // Prevents desync if SMC was left in disabled state (crash, failed cleanup).
@@ -111,6 +126,10 @@ class ChargeLimiter {
     }
 
     func stop() {
+        if smc.usesNativeChargeLimit && !smc.setNativeChargeLimit(100) {
+            Notifier.send("Charge limit still active", "macOS could not disable the limit. You can also change it in System Settings → Battery.", id: "native-limit-error")
+            return
+        }
         isActive = false
         thermalHold = false
         topUpActive = false
@@ -121,7 +140,12 @@ class ChargeLimiter {
 
         // Always re-enable charging — internal state may be
         // out of sync with actual SMC state (crash, failed write, sleep/wake race).
-        let enabled = smc.enableCharging() || smc.enableCharging() // retry once
+        let enabled: Bool
+        if smc.usesNativeChargeLimit {
+            enabled = true
+        } else {
+            enabled = smc.enableCharging() || smc.enableCharging() // retry once
+        }
         if !enabled {
             bbLog.warning("Failed to re-enable charging on stop after retry")
         }
@@ -135,6 +159,15 @@ class ChargeLimiter {
 
     func activateTopUp() {
         guard isActive else { return }
+        if smc.usesNativeChargeLimit {
+            guard smc.setNativeChargeLimit(100) else {
+                Notifier.send("Top Up failed", "macOS could not change the charge limit.", id: "native-limit-error")
+                return
+            }
+            topUpActive = true
+            onStateChange?()
+            return
+        }
         topUpActive = true
         limitNotified = false
         check(percentage: lastPercentage, isPluggedIn: lastIsPluggedIn, temperature: lastTemperature)
@@ -177,7 +210,8 @@ class ChargeLimiter {
         timer = nil
         bbLog.info("Timer suspended for sleep")
 
-        guard isActive && stopChargingBeforeSleep else { return }
+        // macOS enforces the native ceiling during sleep itself.
+        guard !smc.usesNativeChargeLimit, isActive && stopChargingBeforeSleep else { return }
         // Write to SMC without changing chargingEnabled — onWake re-asserts the real state.
         if !smc.disableCharging() {
             bbLog.warning("Failed to disable charging before sleep — will retry on wake")
@@ -191,6 +225,10 @@ class ChargeLimiter {
 
         // Restart the periodic safety timer
         startTimer()
+        if smc.usesNativeChargeLimit {
+            _ = applyNativeLimit()
+            return
+        }
 
         if chargingEnabled {
             if !smc.enableCharging() {
@@ -224,6 +262,13 @@ class ChargeLimiter {
         wasPluggedIn = isPluggedIn
 
         guard isActive else { return }
+
+        if smc.usesNativeChargeLimit {
+            if previouslyPluggedIn && !isPluggedIn { topUpActive = false }
+            _ = applyNativeLimit()
+            onStateChange?()
+            return
+        }
 
         // Anti-micro-charge + Top Up reset on unplug
         if previouslyPluggedIn && !isPluggedIn {
@@ -325,6 +370,23 @@ class ChargeLimiter {
         }
 
         syncMagSafeLED(percentage: percentage)
+    }
+
+    /// Native macOS owns charging, hysteresis, thermal management and sleep.
+    /// Never emulate a charge gate by disconnecting the power adapter.
+    @discardableResult
+    private func applyNativeLimit() -> Bool {
+        let target = topUpActive ? 100 : limitPercentage
+        if smc.nativeChargeLimit == target || smc.setNativeChargeLimit(target) {
+            chargingEnabled = true
+            thermalHold = false
+            return true
+        }
+        isActive = false
+        defaults.set(false, forKey: "chargeLimitEnabled")
+        Notifier.send("Charge limit failed", "macOS could not apply the charge limit. Try enabling it again.", id: "native-limit-error")
+        bbLog.error("Failed to apply native charge limit \(target)")
+        return false
     }
 
     private func syncMagSafeLED(percentage: Int) {
