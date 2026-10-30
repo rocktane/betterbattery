@@ -526,26 +526,15 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         let symbol = base.withSymbolConfiguration(cfg) ?? base
         symbol.isTemplate = true
 
-        // Resolve the tint against the *menu bar's* appearance, not the app's. This image is
-        // drawn eagerly (lockFocus) here, so a plain `NSColor.textColor` would resolve against
-        // whatever appearance is current at build time and come out white on a light menu bar.
-        // (The %/battery are drawn in a deferred handler and already track the menu bar.)
-        var tint = NSColor.textColor
-        if let appearance = statusItem.button?.effectiveAppearance {
-            appearance.performAsCurrentDrawingAppearance {
-                tint = NSColor.textColor.usingColorSpace(.sRGB) ?? .textColor
-            }
-        }
-
+        // Draw lazily so `textColor` resolves against the menu bar's appearance at draw time
+        // (same as the %/battery), and follows light/dark switches.
         let size = NSSize(width: side, height: side)
-        let out = NSImage(size: size)
-        out.lockFocus()
-        tint.set()
-        let rect = NSRect(origin: .zero, size: size)
-        symbol.draw(in: rect)
-        rect.fill(using: .sourceAtop)
-        out.unlockFocus()
-        return out
+        return NSImage(size: size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            NSColor.textColor.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
     }
 
     // MARK: - Actions (WidgetActionDelegate)
