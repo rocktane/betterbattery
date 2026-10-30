@@ -24,7 +24,6 @@ final class HelperService: NSObject, HelperProtocol {
     /// synchronization of their own; the serial queue is their only barrier.
     private func ensureProbed() {
         guard !probed else { return }
-        probed = true
         guard smc.open() else {
             helperLog.error("Cannot open AppleSMC service")
             return
@@ -34,6 +33,7 @@ final class HelperService: NSObject, HelperProtocol {
         } else if smc.read("CH0B") != nil {
             supportsLegacy = true
         }
+        probed = supportsTahoe || supportsLegacy
         helperLog.info("SMC capabilities: tahoe=\(self.supportsTahoe), legacy=\(self.supportsLegacy)")
     }
 

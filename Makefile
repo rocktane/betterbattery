@@ -16,7 +16,7 @@ SWIFT_FLAGS = -O -whole-module-optimization -target arm64-apple-macosx13.0
 FRAMEWORKS = -framework Cocoa -framework IOKit -framework ServiceManagement -framework UserNotifications
 HELPER_FRAMEWORKS = -framework IOKit -framework Security
 
-.PHONY: all build cert install uninstall clean release init-github
+.PHONY: all build test cert install uninstall clean release init-github
 
 all: build
 
@@ -81,3 +81,11 @@ release:
 
 init-github:
 	@./scripts/init-github.sh
+
+# No signing, helper registration or hardware writes needed for regression tests.
+test:
+	@mkdir -p $(BUILD_DIR)/tests
+	$(SWIFTC) Sources/BatteryReader.swift Sources/HelperReply.swift Tests/BatteryReaderTests.swift -framework IOKit -o $(BUILD_DIR)/tests/battery-reader
+	@$(BUILD_DIR)/tests/battery-reader
+	$(SWIFTC) Sources/ChargeLimiter.swift Tests/ChargeLimiterTests.swift -o $(BUILD_DIR)/tests/charge-limiter
+	@$(BUILD_DIR)/tests/charge-limiter

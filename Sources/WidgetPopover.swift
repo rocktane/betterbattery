@@ -38,13 +38,13 @@ struct WidgetModel: Equatable {
     var autoLPMMode = 0        // 0 = %, 1 = time
     var launchAtLogin = false
     var appTheme = 0   // 0 = system, 1 = light, 2 = dark
-    var health = 100
-    var cycleCount = 0
-    var temperature = 0.0
+    var health: Int? = nil
+    var cycleCount: Int? = nil
+    var temperature: Double? = nil
     var uptime = ""
     var uptimeFull = ""            // every unit spelled out, for the card tooltip
     var cyclesSince: String? = nil // battery manufacture date ("29 August 2024")
-    var serviceRecommended = false // macOS's battery condition (not a percentage threshold)
+    var serviceRecommended: Bool? = nil // macOS's battery condition (not a percentage threshold)
     var isPluggedIn = false
     var adapterWatts = 0
     var drawWatts = 0          // actual power drawn by the computer
@@ -978,15 +978,24 @@ final class WidgetViewController: NSViewController {
         }
 
         // collapsible detail cards (same font size as the fixed cards)
-        healthValue.stringValue = "\(m.health)%"
-        cyclesValue.stringValue = "\(m.cycleCount)"
-        tempValue.stringValue = "\(Int(m.temperature.rounded()))°"
+        healthValue.stringValue = m.health.map { "\($0)%" } ?? "—"
+        cyclesValue.stringValue = m.cycleCount.map(String.init) ?? "—"
+        tempValue.stringValue = m.temperature.map { "\(Int($0.rounded()))°" } ?? "—"
 
         // Card tooltips: battery condition straight from macOS (same flag System Settings
         // shows), cycles accrued since the battery's manufacture date, and the exact uptime.
-        healthCard?.toolTip = m.serviceRecommended
-            ? "Service Recommended — Your battery's ability to hold charge is less than when it was new, or it isn't functioning normally."
-            : "Normal — Your battery is functioning normally."
+        let condition: String
+        switch m.serviceRecommended {
+        case true?: condition = "Service Recommended — macOS recommends checking the battery."
+        case false?: condition = "Normal — macOS reports the battery is functioning normally."
+        case nil: condition = "Battery condition unavailable from macOS."
+        }
+        healthCard?.toolTip = condition + (m.health == nil
+            ? " Capacity unavailable."
+            : " Capacity estimated from full charge / design capacity; may differ from System Settings.")
+        tempValue.toolTip = m.temperature == nil
+            ? "Temperature unavailable — thermal monitoring cannot evaluate the battery."
+            : "Battery temperature in °C"
         cyclesCard?.toolTip = m.cyclesSince.map { "Since \($0)" }
         uptimeCard?.toolTip = m.uptimeFull
 

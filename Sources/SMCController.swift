@@ -7,120 +7,81 @@ enum MagSafeLEDColor: UInt8 {
     case orangeFastBlink = 0x07 // Orange clignotement rapide (alerte thermique)
 }
 
-/// XPC client facade over the privileged helper daemon.
-/// Keeps the same synchronous public API as the old sudo/smc implementation:
-/// every call blocks for the (ms-scale) round trip; if the daemon is not
-/// running or not approved, the error handler fires and methods return
-/// false/nil — fail-closed, identical to the old semantics.
+/// Bounded XPC facade: a missing or stalled helper returns false/nil, so the
+/// menu bar remains usable even after background approval is revoked.
 class SMCController {
     private(set) var supportsTahoe: Bool = false
     private(set) var supportsLegacy: Bool = false
     private(set) var isAvailable: Bool = false
 
-    private var connection: NSXPCConnection?
-
     init() {
         detectCapabilities()
     }
 
-    // MARK: - XPC plumbing
-
-    private func proxy() -> HelperProtocol? {
-        if connection == nil {
-            let c = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
-            c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
-            c.invalidationHandler = { [weak self] in
-                DispatchQueue.main.async { self?.connection = nil }
-            }
-            c.resume()
-            connection = c
-        }
-        return connection?.synchronousRemoteObjectProxyWithErrorHandler { error in
+    // Each request owns its connection. Invalidating a timed-out request cannot
+    // accidentally invalidate a newer connection or accept its late reply.
+    private static func request<Value>(
+        timeout: TimeInterval = 3,
+        _ perform: (HelperProtocol, @escaping (Value) -> Void) -> Void
+    ) -> Value? {
+        let reply = HelperReply<Value>()
+        let connection = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
+        connection.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
+        connection.invalidationHandler = { reply.finish(nil) }
+        connection.interruptionHandler = { reply.finish(nil) }
+        connection.resume()
+        defer { connection.invalidate() }
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
             bbLog.warning("Helper XPC error: \(error.localizedDescription)")
-        } as? HelperProtocol
+            reply.finish(nil)
+        }) as? HelperProtocol else { return nil }
+        perform(proxy) { reply.finish($0) }
+        return reply.wait(timeout: timeout)
     }
 
-    // MARK: - Version
-
-    /// Daemon protocol version, or nil if the daemon didn't answer within `timeout`.
-    /// Standalone connection + async proxy so it is safe to call BEFORE any
-    /// synchronous XPC: a registration launchd cannot spawn ("spawn failed")
-    /// never replies and never invalidates, which hangs sync calls forever.
-    /// This is the startup health probe — it must not require an instance,
-    /// because SMCController.init itself performs XPC.
     static func probeHelperVersion(timeout: TimeInterval = 3) -> String? {
-        let c = NSXPCConnection(machServiceName: kHelperMachService, options: .privileged)
-        c.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
-        c.resume()
-        defer { c.invalidate() }
-        let sem = DispatchSemaphore(value: 0)
-        var version: String?
-        let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
-        p?.getVersion { v in
-            version = v
-            sem.signal()
-        }
-        _ = sem.wait(timeout: .now() + timeout)
-        return version
+        request(timeout: timeout) { proxy, reply in proxy.getVersion(reply: reply) }
     }
 
     // MARK: - Key Operations
 
     func readKey(_ key: String) -> Data? {
-        var result: Data?
-        proxy()?.readKey(key) { result = $0 }
-        return result
+        let result: Data?? = Self.request { proxy, reply in proxy.readKey(key, reply: reply) }
+        return result ?? nil
     }
 
-    // MARK: - High-Level Charge Control
-
     func enableCharging() -> Bool {
-        var ok = false
-        proxy()?.enableCharging { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.enableCharging(reply: reply) } ?? false
     }
 
     func disableCharging() -> Bool {
-        var ok = false
-        proxy()?.disableCharging { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.disableCharging(reply: reply) } ?? false
     }
 
-    /// Returns true when charging is enabled in SMC, false when explicitly disabled.
-    /// Returns nil if the helper is unreachable or the value is unexpected.
+    /// nil means the helper could not determine the hardware state.
     func isChargingEnabledInSMC() -> Bool? {
-        var result: Bool?
-        proxy()?.isChargingEnabled { ok, enabled in
-            result = ok ? enabled : nil
+        let result: (Bool, Bool)? = Self.request { proxy, reply in
+            proxy.isChargingEnabled { reply(($0, $1)) }
         }
-        return result
+        guard let (ok, enabled) = result, ok else { return nil }
+        return enabled
     }
 
     func enableDischarge() -> Bool {
-        var ok = false
-        proxy()?.enableDischarge { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.enableDischarge(reply: reply) } ?? false
     }
 
     func disableDischarge() -> Bool {
-        var ok = false
-        proxy()?.disableDischarge { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.disableDischarge(reply: reply) } ?? false
     }
 
     @discardableResult
     func setMagSafeLED(_ color: MagSafeLEDColor) -> Bool {
-        var ok = false
-        proxy()?.setMagSafeLED(color.rawValue) { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.setMagSafeLED(color.rawValue, reply: reply) } ?? false
     }
 
-    // MARK: - Low Power Mode
-
     func setLowPowerMode(_ enabled: Bool) -> Bool {
-        var ok = false
-        proxy()?.setLowPowerMode(enabled) { ok = $0 }
-        return ok
+        Self.request { proxy, reply in proxy.setLowPowerMode(enabled, reply: reply) } ?? false
     }
 
     // MARK: - Capabilities Detection
@@ -134,27 +95,13 @@ class SMCController {
     }
 
     private func detectCapabilities() {
-        var tahoe = false
-        var legacy = false
-        var reached = false
-        // Async + timeout: this runs at init, before the UI exists — an
-        // unspawnable daemon must degrade to "unavailable", not hang the app.
-        _ = proxy()  // ensure the connection exists
-        if let c = connection {
-            let sem = DispatchSemaphore(value: 0)
-            let p = c.remoteObjectProxyWithErrorHandler { _ in sem.signal() } as? HelperProtocol
-            p?.probeCapabilities { t, l in
-                tahoe = t
-                legacy = l
-                reached = true
-                sem.signal()
-            }
-            _ = sem.wait(timeout: .now() + 5)
+        let result: (Bool, Bool)? = Self.request { proxy, reply in
+            proxy.probeCapabilities { reply(($0, $1)) }
         }
-        supportsTahoe = tahoe
-        supportsLegacy = legacy
-        isAvailable = reached && (tahoe || legacy)
-        if !reached {
+        supportsTahoe = result?.0 ?? false
+        supportsLegacy = result?.1 ?? false
+        isAvailable = supportsTahoe || supportsLegacy
+        if result == nil {
             bbLog.warning("Helper daemon unreachable — charge control unavailable")
         }
     }
