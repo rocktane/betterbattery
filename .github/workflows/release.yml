@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build (for example v1.4.4)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,13 +17,15 @@ permissions:
 jobs:
   release:
     name: Build & Release
-    runs-on: macos-14
+    runs-on: macos-15
     outputs:
       version: ${{ steps.meta.outputs.version }}
       sha256: ${{ steps.meta.outputs.sha256 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Show Swift version
         run: swift --version
@@ -50,12 +58,13 @@ jobs:
       - name: Package & compute SHA256
         id: meta
         env:
-          REF: ${{ github.ref }}
+          REF: ${{ inputs.tag || github.ref }}
         run: |
           cd build
           zip -r BetterBattery.zip BetterBattery.app
           SHA=$(shasum -a 256 BetterBattery.zip | awk '{print $1}')
-          VERSION="${REF#refs/tags/v}"
+          VERSION="${REF##*/}"
+          VERSION="${VERSION#v}"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -65,6 +74,7 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
           OWNER: ${{ github.repository_owner }}
         with:
+          tag_name: v${{ steps.meta.outputs.version }}
           name: BetterBattery v${{ steps.meta.outputs.version }}
           body: |
             ## Installation
