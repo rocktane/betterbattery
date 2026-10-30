@@ -245,7 +245,8 @@ class BatteryIconView: NSView {
             controlPoint2: CGPoint(x: endX - tildeWidth * 0.15, y: centerY - amplitude)
         )
 
-        NSColor.white.set()
+        // At low charge the wave sits over the empty battery, not the fill.
+        (percentage <= 25 ? NSColor.black : NSColor.white).set()
         tilde.lineWidth = lineWidth
         tilde.lineCapStyle = .round
         tilde.stroke()
