@@ -8,15 +8,15 @@ struct BatteryState {
     var isPluggedIn: Bool = false
     var timeToEmpty: Int? = nil    // minutes
     var timeToCharge: Int? = nil   // minutes
-    var health: Int = 100
-    var cycleCount: Int = 0
+    var health: Int? = nil
+    var cycleCount: Int? = nil
     var voltage: Double = 0.0      // V
-    var temperature: Double = 0.0  // °C
+    var temperature: Double? = nil  // °C
     var amperage: Int = 0          // mA (negative = discharging)
     var adapterWatts: Int = 0      // AC adapter rated wattage
     var systemPowerIn: Int = 0     // mW actually drawn by the computer (adapter input)
     var manufactureDate: Date? = nil
-    var serviceRecommended: Bool = false  // macOS's own battery condition flag
+    var serviceRecommended: Bool? = nil  // macOS's own battery condition flag
 
     var timeRemaining: Int? {
         if isCharging {
@@ -36,8 +36,10 @@ struct BatteryState {
 class BatteryReader {
     var onUpdate: ((BatteryState) -> Void)?
     private var runLoopSource: CFRunLoopSource?
+    private var refreshTimer: Timer?
 
     func start() {
+        stop()
         // Register for power source change notifications
         let context = Unmanaged.passUnretained(self).toOpaque()
         if let source = IOPSNotificationCreateRunLoopSource({ context in
@@ -46,16 +48,26 @@ class BatteryReader {
             reader.readBatteryState()
         }, context)?.takeRetainedValue() {
             self.runLoopSource = source
-            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         }
+
+        // Power-source notifications need not fire for temperature/telemetry changes.
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            self?.readBatteryState()
+        }
+        timer.tolerance = 10
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
 
         // Initial read
         readBatteryState()
     }
 
     func stop() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
         if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
             runLoopSource = nil
         }
     }
@@ -111,8 +123,8 @@ class BatteryReader {
             // Battery condition as System Settings reports it: powerd publishes
             // "Good" + an empty condition while the battery is Normal, and sets
             // BatteryHealthCondition (e.g. "Check Battery") when service is due.
-            if let health = info[kIOPSBatteryHealthKey] as? String, health != kIOPSGoodValue {
-                state.serviceRecommended = true
+            if let health = info[kIOPSBatteryHealthKey] as? String {
+                state.serviceRecommended = health != kIOPSGoodValue
             }
             if let condition = info[kIOPSBatteryHealthConditionKey] as? String, !condition.isEmpty {
                 state.serviceRecommended = true
@@ -132,57 +144,73 @@ class BatteryReader {
         defer { IOObjectRelease(service) }
 
         if let props = getProperties(service) {
-            if let cycleCount = props["CycleCount"] as? Int {
-                state.cycleCount = cycleCount
-            }
-            // Health: use AppleRawMaxCapacity on ARM (same as Stats)
-            #if arch(arm64)
-            let maxCapKey = "AppleRawMaxCapacity"
-            #else
-            let maxCapKey = "MaxCapacity"
-            #endif
-            if let maxCap = props[maxCapKey] as? Int,
-               let designCap = props["DesignCapacity"] as? Int,
-               designCap > 0 {
-                state.health = Int((Double(100 * maxCap) / Double(designCap)).rounded(.toNearestOrEven))
-            }
-            if let voltage = props["Voltage"] as? Int {
-                state.voltage = Double(voltage) / 1000.0
-            }
-            if let temp = props["Temperature"] as? Int {
-                state.temperature = Double(temp) / 100.0
-            }
-            // Fallback for charging state from SMC level
-            if let externalConnected = props["ExternalConnected"] as? Bool {
-                state.isPluggedIn = externalConnected
-            }
-            if let isCharging = props["IsCharging"] as? Bool {
-                state.isCharging = isCharging
-            }
-            if let currentCap = props["CurrentCapacity"] as? Int,
-               let maxCap = props["MaxCapacity"] as? Int,
-               maxCap > 0 {
-                state.percentage = (currentCap * 100) / maxCap
-            }
-            if let amperage = props["Amperage"] as? Int {
-                state.amperage = amperage
-            }
-            // Actual power drawn by the computer from the adapter (mW), even when the
-            // battery isn't charging. Present on Apple Silicon under PowerTelemetryData.
-            if let telemetry = props["PowerTelemetryData"] as? [String: Any],
-               let systemPowerIn = telemetry["SystemPowerIn"] as? Int, systemPowerIn > 0 {
-                state.systemPowerIn = systemPowerIn
-            }
-            // Battery manufacture date. Intel exposes the SBS bitfield; Apple Silicon
-            // encodes year + ISO week in the pack serial (same source coconutBattery uses —
-            // BatteryData.ManufactureDate is a lot code, not a date).
-            if let packed = props["ManufactureDate"] as? Int {
-                state.manufactureDate = Self.dateFromSBS(packed)
-            } else if let serial = props["Serial"] as? String {
-                state.manufactureDate = Self.dateFromSerial(serial)
-            }
-            // Time values come from IOPowerSources only (same source as Stats app)
+            Self.applySmartBatteryProperties(props, to: &state)
         }
+    }
+
+    /// Shared decoding path for live registry snapshots and regression fixtures.
+    static func applySmartBatteryProperties(_ props: [String: Any], to state: inout BatteryState) {
+        if let cycleCount = props["CycleCount"] as? Int {
+            state.cycleCount = cycleCount
+        }
+        // macOS 27 moves the mAh capacities into BatteryData. Never divide
+        // the normalized MaxCapacity (100 on Apple Silicon) by a mAh value.
+        let data = props["BatteryData"] as? [String: Any] ?? [:]
+        #if arch(arm64)
+        let pairs: [(Any?, Any?)] = [
+            (data["FullChargeCapacity"], data["DesignCapacity"]),
+            (props["AppleRawMaxCapacity"], props["DesignCapacity"]),
+            (data["NominalChargeCapacity"], data["DesignCapacity"]),
+            (props["NominalChargeCapacity"], props["DesignCapacity"])
+        ]
+        #else
+        let pairs: [(Any?, Any?)] = [(props["MaxCapacity"], props["DesignCapacity"])]
+        #endif
+        for (full, design) in pairs {
+            guard let full = full as? Int, let design = design as? Int,
+                  full > 0, design > 0 else { continue }
+            let ratio = Double(full) / Double(design)
+            guard ratio.isFinite, ratio <= 1.5 else { continue }
+            state.health = min(100, Int((100 * ratio).rounded(.toNearestOrEven)))
+            break
+        }
+        if let voltage = props["Voltage"] as? Int {
+            state.voltage = Double(voltage) / 1000.0
+        }
+        if let temp = (props["Temperature"] ?? data["Temperature"]) as? Int,
+           temp > 0, temp < 10000 {
+            state.temperature = Double(temp) / 100.0
+        }
+        // Fallback for charging state from SMC level
+        if let externalConnected = props["ExternalConnected"] as? Bool {
+            state.isPluggedIn = externalConnected
+        }
+        if let isCharging = props["IsCharging"] as? Bool {
+            state.isCharging = isCharging
+        }
+        if let currentCap = props["CurrentCapacity"] as? Int,
+           let maxCap = props["MaxCapacity"] as? Int,
+           maxCap > 0 {
+            state.percentage = Int(min(100, max(0, Double(currentCap) / Double(maxCap) * 100)))
+        }
+        if let amperage = props["Amperage"] as? Int {
+            state.amperage = amperage
+        }
+        // Actual power drawn by the computer from the adapter (mW), even when the
+        // battery isn't charging. Present on Apple Silicon under PowerTelemetryData.
+        if let telemetry = props["PowerTelemetryData"] as? [String: Any],
+           let systemPowerIn = telemetry["SystemPowerIn"] as? Int, systemPowerIn > 0 {
+            state.systemPowerIn = systemPowerIn
+        }
+        // Battery manufacture date. Intel exposes the SBS bitfield; Apple Silicon
+        // encodes year + ISO week in the pack serial (same source coconutBattery uses —
+        // BatteryData.ManufactureDate is a lot code, not a date).
+        if let packed = props["ManufactureDate"] as? Int {
+            state.manufactureDate = Self.dateFromSBS(packed)
+        } else if let serial = props["Serial"] as? String {
+            state.manufactureDate = Self.dateFromSerial(serial)
+        }
+        // Time values come from IOPowerSources only (same source as Stats app)
     }
 
     /// Apple Silicon pack serials encode the manufacture date after the 3-char site code:

@@ -4,7 +4,7 @@ import os.log
 class ChargeLimiter {
     private let smc: SMCController
     private var timer: Timer?
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
     // Thermal protection thresholds (°C)
     private let thermalStopCharging: Double = 40.0
@@ -53,7 +53,7 @@ class ChargeLimiter {
 
     private var lastPercentage: Int = 0
     private var lastIsPluggedIn: Bool = false
-    private var lastTemperature: Double = 0.0
+    private var lastTemperature: Double? = nil
     private var wasPluggedIn: Bool = false
     private var lastLEDColor: MagSafeLEDColor?
 
@@ -65,8 +65,9 @@ class ChargeLimiter {
     }
     var lowerBound: Int { max(0, limitPercentage - hysteresisAmplitude) }
 
-    init(smc: SMCController) {
+    init(smc: SMCController, defaults: UserDefaults = .standard) {
         self.smc = smc
+        self.defaults = defaults
         let savedLimit = defaults.integer(forKey: "chargeLimitPercentage")
         if savedLimit > 0 {
             if savedLimit >= 20 && savedLimit <= 100 {
@@ -136,7 +137,8 @@ class ChargeLimiter {
         guard isActive else { return }
         topUpActive = true
         limitNotified = false
-        if !chargingEnabled {
+        check(percentage: lastPercentage, isPluggedIn: lastIsPluggedIn, temperature: lastTemperature)
+        if !chargingEnabled && !thermalHold {
             if smc.enableCharging() {
                 chargingEnabled = true
                 smc.setMagSafeLED(.system)
@@ -214,7 +216,7 @@ class ChargeLimiter {
 
     // MARK: - Main check
 
-    func check(percentage: Int, isPluggedIn: Bool, temperature: Double) {
+    func check(percentage: Int, isPluggedIn: Bool, temperature: Double?) {
         let previouslyPluggedIn = wasPluggedIn
         lastPercentage = percentage
         lastIsPluggedIn = isPluggedIn
@@ -246,7 +248,7 @@ class ChargeLimiter {
         reconcileChargingStateWithSMC()
 
         // Plug-in transition: re-enable charging if below limit
-        if !previouslyPluggedIn && isPluggedIn && !chargingEnabled && percentage < upperBound {
+        if !previouslyPluggedIn && isPluggedIn && !chargingEnabled && !thermalHold && percentage < upperBound {
             if smc.enableCharging() {
                 chargingEnabled = true
                 smc.setMagSafeLED(.system)
@@ -255,8 +257,8 @@ class ChargeLimiter {
         }
 
         // Thermal protection
-        if temperature > thermalStopCharging && chargingEnabled {
-            if smc.disableCharging() {
+        if let temperature = temperature, temperature > thermalStopCharging {
+            if !chargingEnabled || smc.disableCharging() {
                 chargingEnabled = false
                 let newHold = !thermalHold
                 thermalHold = true
@@ -272,7 +274,7 @@ class ChargeLimiter {
             return
         }
 
-        if thermalHold && temperature < thermalResumeCharging {
+        if thermalHold, let temperature = temperature, temperature < thermalResumeCharging {
             thermalHold = false
             // Restore charging if below limit (avoids dead zone where neither hysteresis branch triggers)
             if !chargingEnabled && percentage < upperBound {
@@ -288,7 +290,14 @@ class ChargeLimiter {
                           id: "thermal")
         }
 
-        if thermalHold { return }
+        if thermalHold {
+            // A missing sensor must not let an external SMC change bypass the hold.
+            if chargingEnabled && smc.disableCharging() {
+                chargingEnabled = false
+                onStateChange?()
+            }
+            return
+        }
 
         // Hysteresis charge control
         if percentage >= upperBound && chargingEnabled {

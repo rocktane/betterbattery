@@ -66,3 +66,6 @@ Thumbs.db
 
 # === Markdown ===
 *.md
+
+# Compatibility audit
+!docs/macos-27-audit.md
