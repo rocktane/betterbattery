@@ -91,14 +91,14 @@ class BatteryIconView: NSView {
         let fillInset: CGFloat = borderWidth + 1
         let maxFillWidth = batteryWidth - fillInset * 2
         let fillWidth = max(0, maxFillWidth * CGFloat(max(0, min(100, percentage))) / 100.0)
+        let fillRect = NSRect(
+            x: fillInset,
+            y: yOffset + fillInset,
+            width: fillWidth,
+            height: batteryHeight - fillInset * 2
+        )
 
         if fillWidth > 0 {
-            let fillRect = NSRect(
-                x: fillInset,
-                y: yOffset + fillInset,
-                width: fillWidth,
-                height: batteryHeight - fillInset * 2
-            )
             let innerRadius = max(0, cornerRadius - 1)
             let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: innerRadius, yRadius: innerRadius)
 
@@ -120,9 +120,9 @@ class BatteryIconView: NSView {
             let centerY = yOffset + batteryHeight / 2.0
 
             if topUpActive {
-                drawPlus(ctx: ctx, centerX: centerX, centerY: centerY)
+                drawPlus(ctx: ctx, centerX: centerX, centerY: centerY, fillRect: fillRect)
             } else if chargeLimitActive {
-                drawPause(ctx: ctx, centerX: centerX, centerY: centerY)
+                drawPause(ctx: ctx, centerX: centerX, centerY: centerY, fillRect: fillRect)
             } else if isCharging {
                 drawBolt(ctx: ctx, centerX: centerX, centerY: centerY)
             } else {
@@ -206,7 +206,7 @@ class BatteryIconView: NSView {
         ctx.restoreGState()
     }
 
-    private func drawPlus(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+    private func drawPlus(ctx: CGContext, centerX: CGFloat, centerY: CGFloat, fillRect: NSRect) {
         let armLength: CGFloat = 2.5
         let lineWidth: CGFloat = 1.5
 
@@ -218,13 +218,12 @@ class BatteryIconView: NSView {
         plus.move(to: CGPoint(x: centerX, y: centerY - armLength))
         plus.line(to: CGPoint(x: centerX, y: centerY + armLength))
 
-        NSColor.white.set()
         plus.lineWidth = lineWidth
         plus.lineCapStyle = .round
-        plus.stroke()
+        strokeOverlay(plus, ctx: ctx, fillRect: fillRect)
     }
 
-    private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat) {
+    private func drawPause(ctx: CGContext, centerX: CGFloat, centerY: CGFloat, fillRect: NSRect) {
         let tildeWidth: CGFloat = 8.0
         let amplitude: CGFloat = 2.0
         let lineWidth: CGFloat = 1.5
@@ -245,11 +244,32 @@ class BatteryIconView: NSView {
             controlPoint2: CGPoint(x: endX - tildeWidth * 0.15, y: centerY - amplitude)
         )
 
-        // At low charge the wave sits over the empty battery, not the fill.
-        (percentage <= 25 ? NSColor.black : NSColor.white).set()
         tilde.lineWidth = lineWidth
         tilde.lineCapStyle = .round
-        tilde.stroke()
+        strokeOverlay(tilde, ctx: ctx, fillRect: fillRect)
+    }
+
+    /// Strokes an overlay glyph in two colors split along the fill edge: the part over the
+    /// charge fill contrasts with the fill, the part over the empty battery uses the text
+    /// color so it stays visible against the menu bar.
+    private func strokeOverlay(_ path: NSBezierPath, ctx: CGContext, fillRect: NSRect) {
+        // Over the empty battery
+        ctx.saveGState()
+        ctx.addRect(ctx.boundingBoxOfClipPath)
+        ctx.addRect(fillRect)
+        ctx.clip(using: .evenOdd)
+        NSColor.textColor.set()
+        path.stroke()
+        ctx.restoreGState()
+
+        // Over the fill: white on the red/orange low-charge fill, otherwise the inverse of
+        // the text-colored fill (white in light mode, black in dark mode)
+        guard fillRect.width > 0 else { return }
+        ctx.saveGState()
+        ctx.clip(to: fillRect)
+        (percentage <= 25 ? NSColor.white : NSColor.textBackgroundColor).set()
+        path.stroke()
+        ctx.restoreGState()
     }
 
     // MARK: - Low Power Mode indicator
