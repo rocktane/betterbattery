@@ -524,24 +524,56 @@ class StatusBarController: NSObject, WidgetActionDelegate {
         return image
     }
 
-    /// Coffee-cup SF Symbol tinted to the menu bar text color.
+    /// Outlined mug with two steam wisps, in the menu bar text color.
+    /// Geometry is laid out on a 13 pt grid and scaled to `side`.
     private func tintedCupImage(side: CGFloat) -> NSImage? {
-        guard let base = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "Éveil") else {
-            return nil
-        }
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-        let symbol = base.withSymbolConfiguration(cfg) ?? base
-        symbol.isTemplate = true
-
         // Draw lazily so `textColor` resolves against the menu bar's appearance at draw time
         // (same as the %/battery), and follows light/dark switches.
         let size = NSSize(width: side, height: side)
-        return NSImage(size: size, flipped: false) { rect in
-            symbol.draw(in: rect)
+        let image = NSImage(size: size, flipped: false) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.saveGState()
+            ctx.translateBy(x: rect.minX, y: rect.minY)
+            ctx.scaleBy(x: rect.width / 13, y: rect.height / 13)
             NSColor.textColor.set()
-            rect.fill(using: .sourceAtop)
+
+            // Body: straight sides, rounded bottom corners, open-looking flat top
+            let body = NSBezierPath()
+            body.move(to: CGPoint(x: 1.5, y: 7))
+            body.line(to: CGPoint(x: 1.5, y: 3))
+            body.appendArc(withCenter: CGPoint(x: 3.5, y: 3), radius: 2, startAngle: 180, endAngle: 270)
+            body.line(to: CGPoint(x: 7.5, y: 1))
+            body.appendArc(withCenter: CGPoint(x: 7.5, y: 3), radius: 2, startAngle: 270, endAngle: 360)
+            body.line(to: CGPoint(x: 9.5, y: 7))
+            body.close()
+            body.lineWidth = 1.3
+            body.lineJoinStyle = .round
+            body.stroke()
+
+            // Handle
+            let handle = NSBezierPath()
+            handle.appendArc(withCenter: CGPoint(x: 9.5, y: 4.7), radius: 1.9,
+                             startAngle: 90, endAngle: -90, clockwise: true)
+            handle.lineWidth = 1.3
+            handle.stroke()
+
+            // Steam
+            for x in [3.8, 7.0] as [CGFloat] {
+                let wisp = NSBezierPath()
+                wisp.move(to: CGPoint(x: x, y: 8.6))
+                wisp.curve(to: CGPoint(x: x, y: 12.2),
+                           controlPoint1: CGPoint(x: x - 1.3, y: 9.8),
+                           controlPoint2: CGPoint(x: x + 1.3, y: 11))
+                wisp.lineWidth = 1.1
+                wisp.lineCapStyle = .round
+                wisp.stroke()
+            }
+
+            ctx.restoreGState()
             return true
         }
+        image.accessibilityDescription = "Éveil"
+        return image
     }
 
     // MARK: - Actions (WidgetActionDelegate)
